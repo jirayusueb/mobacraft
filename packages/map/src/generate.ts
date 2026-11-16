@@ -1,6 +1,6 @@
 import { alongPath, dist, distToPath, mirror, scale, smoothstep, v } from "./geometry.ts"
 import * as Layout from "./layout.ts"
-import { createNoise, createRng } from "./random.ts"
+import { Rng, ValueNoise } from "./random.ts"
 import {
   Terrain,
   type Camp,
@@ -143,8 +143,8 @@ const mirrorStructure = (s: Structure): Structure => {
  */
 export const generateMap = (spec: MapSpec = DEFAULT_SPEC): MobaMap => {
   const N = spec.size
-  const rng = createRng(spec.seed)
-  const noise = createNoise(spec.seed ^ 0x9e3779b9)
+  const rng = new Rng(spec.seed)
+  const noise = new ValueNoise(spec.seed ^ 0x9e3779b9)
   const toWorld = (p: Vec2) => scale(p, N)
 
   // --- structures, camps, landmarks (normalised) --------------------------------
@@ -199,7 +199,7 @@ export const generateMap = (spec: MapSpec = DEFAULT_SPEC): MobaMap => {
 
       // Radiant owns the half below the anti-diagonal.
       side[i] = p.x + (1 - p.z) > 1 ? 1 : 0
-      tint[i] = noise(p.x * 9, p.z * 9, 3)
+      tint[i] = noise.sample(p.x * 9, p.z * 9, 3)
 
       // Height: clean single-step cliffs (Quack-style) — plateau bases and a
       // carved river bank. Only lanes get smooth ramps, like Dota's high-ground
@@ -226,7 +226,7 @@ export const generateMap = (spec: MapSpec = DEFAULT_SPEC): MobaMap => {
       else if (dPlaza < PLAZA_R) t = Terrain.Plaza
       else if (dLane < LANE_W) t = Terrain.Lane
       else {
-        const forestNoise = noise(p.x * 14 + 31, p.z * 14 - 17, 2)
+        const forestNoise = noise.sample(p.x * 14 + 31, p.z * 14 - 17, 2)
         const open =
           dLane < LANE_CLEAR ||
           dCamp < CAMP_CLEAR ||
@@ -249,23 +249,23 @@ export const generateMap = (spec: MapSpec = DEFAULT_SPEC): MobaMap => {
       const i = tz * N + tx
       const team: Team = side[i] === 0 ? "radiant" : "dire"
       if (terrain[i] === Terrain.Forest) {
-        if (rng() < 0.55) {
+        if (rng.next() < 0.55) {
           trees.push({
-            position: v(tx + 0.2 + rng() * 0.6, tz + 0.2 + rng() * 0.6),
-            scale: 0.7 + rng() * 0.6,
+            position: v(tx + 0.2 + rng.next() * 0.6, tz + 0.2 + rng.next() * 0.6),
+            scale: 0.7 + rng.next() * 0.6,
             team,
-            variant: rng(),
+            variant: rng.next(),
           })
         }
       } else if (terrain[i] === Terrain.Grass || terrain[i] === Terrain.Shore) {
-        const r = rng()
+        const r = rng.next()
         const kind = r < 0.1 ? "flower" : r < 0.13 ? "bush" : r < 0.145 ? "rock" : undefined
         if (kind)
           props.push({
             kind,
-            position: v(tx + rng(), tz + rng()),
-            scale: 0.6 + rng() * 0.6,
-            variant: rng(),
+            position: v(tx + rng.next(), tz + rng.next()),
+            scale: 0.6 + rng.next() * 0.6,
+            variant: rng.next(),
           })
       }
     }

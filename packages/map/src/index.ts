@@ -6,4 +6,5 @@
  * reads the same `MobaMap`.
  */
 export { DEFAULT_SPEC, generateMap } from "./generate.ts"
+export { Rng, ValueNoise } from "./random.ts"
 export * from "./types.ts"

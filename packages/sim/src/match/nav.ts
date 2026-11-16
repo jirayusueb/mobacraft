@@ -2,34 +2,158 @@
  * Navigation — grid A* over MobaMap walkability (1 tile cells, 8-connected,
  * no corner cutting), with path smoothing by line-of-sight string pulling.
  *
- * Interface: createNav(map) → { path(from, to) → Vec2[] (waypoints, excluding start) }
+ * Interface: `new Nav(map)` → `path(from, to)` → Vec2[] (waypoints, excluding start).
  * Results are cached by (start cell, goal cell); goals inside blocked cells snap to
  * the nearest walkable cell. Water counts as walkable (heroes wade the river).
  */
 import { type MobaMap, Terrain, type Vec2 } from "@mobacraft/map"
 
-export const createNav = (map: MobaMap) => {
-  const N = map.size
-  const open = new Uint8Array(N * N)
-  for (let z = 0; z < N; z++)
-    for (let x = 0; x < N; x++) {
-      const t = map.terrain[z * N + x]
-      // Structures are fine to path near; only forest blocks. Water is wadeable.
-      open[z * N + x] = t === Terrain.Forest ? 0 : 1
-    }
+const DIRS = [
+  [1, 0, 1],
+  [-1, 0, 1],
+  [0, 1, 1],
+  [0, -1, 1],
+  [1, 1, Math.SQRT2],
+  [1, -1, Math.SQRT2],
+  [-1, 1, Math.SQRT2],
+  [-1, -1, Math.SQRT2],
+] as const
 
-  const cellOf = (p: Vec2) => {
+const MAX_EXPANDED = 20000
+const MAX_CACHE = 4000
+const SNAP_RADIUS = 12
+
+/** Min-heap of (f, cell) pairs in parallel arrays; reused across searches. */
+class CellHeap {
+  readonly #f: number[] = []
+  readonly #c: number[] = []
+
+  get size(): number {
+    return this.#f.length
+  }
+
+  clear(): void {
+    this.#f.length = 0
+    this.#c.length = 0
+  }
+
+  push(f: number, c: number): void {
+    const hf = this.#f
+    const hc = this.#c
+    let i = hf.length
+    hf.push(f)
+    hc.push(c)
+    while (i > 0) {
+      const p = (i - 1) >> 1
+      if (hf[p]! <= f) break
+      hf[i] = hf[p]!
+      hc[i] = hc[p]!
+      i = p
+    }
+    hf[i] = f
+    hc[i] = c
+  }
+
+  pop(): number {
+    const hf = this.#f
+    const hc = this.#c
+    const top = hc[0]!
+    const lf = hf.pop()!
+    const lc = hc.pop()!
+    if (hf.length) {
+      let i = 0
+      for (;;) {
+        const l = 2 * i + 1
+        if (l >= hf.length) break
+        const r = l + 1
+        const m = r < hf.length && hf[r]! < hf[l]! ? r : l
+        if (hf[m]! >= lf) break
+        hf[i] = hf[m]!
+        hc[i] = hc[m]!
+        i = m
+      }
+      hf[i] = lf
+      hc[i] = lc
+    }
+    return top
+  }
+}
+
+export class Nav {
+  readonly #n: number
+  readonly #open: Uint8Array
+  // A* scratch buffers, reused.
+  readonly #g: Float32Array
+  readonly #came: Int32Array
+  readonly #seen: Uint32Array
+  readonly #heap = new CellHeap()
+  #stamp = 0
+  readonly #cache = new Map<number, readonly Vec2[]>()
+
+  constructor(map: MobaMap) {
+    const N = map.size
+    this.#n = N
+    this.#open = new Uint8Array(N * N)
+    for (let i = 0; i < N * N; i++) {
+      // Structures are fine to path near; only forest blocks. Water is wadeable.
+      this.#open[i] = map.terrain[i] === Terrain.Forest ? 0 : 1
+    }
+    this.#g = new Float32Array(N * N)
+    this.#came = new Int32Array(N * N)
+    this.#seen = new Uint32Array(N * N)
+  }
+
+  walkable(p: Vec2): boolean {
+    return this.#open[this.#cellOf(p)] === 1
+  }
+
+  /** Waypoints from `from` to `to`, excluding the start; always ends at `to`. */
+  path(from: Vec2, to: Vec2): readonly Vec2[] {
+    const N = this.#n
+    const s = this.#snap(this.#cellOf(from))
+    const t = this.#snap(this.#cellOf(to))
+    if (s === t || this.#clear(s, t)) return [to]
+    const key = s * N * N + t
+    const hit = this.#cache.get(key)
+    if (hit) return hit
+    const cells = this.#astar(s, t)
+    if (cells.length === 0) return [to]
+    // String-pull: keep only cells needed to stay in line of sight.
+    const pts: number[] = []
+    let anchor = cells[0]!
+    for (let i = 1; i < cells.length; i++) {
+      if (!this.#clear(anchor, cells[i]!)) {
+        anchor = cells[i - 1]!
+        pts.push(anchor)
+      }
+    }
+    const result = [
+      ...pts.map((c) => {
+        const x = c % N
+        return { x: x + 0.5, z: (c - x) / N + 0.5 }
+      }),
+      to,
+    ]
+    if (this.#cache.size > MAX_CACHE) this.#cache.clear()
+    this.#cache.set(key, result)
+    return result
+  }
+
+  #cellOf(p: Vec2): number {
+    const N = this.#n
     const x = Math.max(0, Math.min(N - 1, Math.floor(p.x)))
     const z = Math.max(0, Math.min(N - 1, Math.floor(p.z)))
     return z * N + x
   }
 
   /** Nearest open cell by expanding rings. */
-  const snap = (c: number) => {
+  #snap(c: number): number {
+    const N = this.#n
+    const open = this.#open
     if (open[c]) return c
     const cx = c % N
     const cz = (c - cx) / N
-    for (let r = 1; r < 12; r++)
+    for (let r = 1; r < SNAP_RADIUS; r++)
       for (let dz = -r; dz <= r; dz++)
         for (let dx = -r; dx <= r; dx++) {
           if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
@@ -41,7 +165,9 @@ export const createNav = (map: MobaMap) => {
   }
 
   /** Bresenham-ish supercover line test over open cells. */
-  const clear = (a: number, b: number) => {
+  #clear(a: number, b: number): boolean {
+    const N = this.#n
+    const open = this.#open
     let x0 = a % N
     let z0 = (a - x0) / N
     const x1 = b % N
@@ -67,65 +193,15 @@ export const createNav = (map: MobaMap) => {
     return true
   }
 
-  // A* scratch buffers, reused.
-  const g = new Float32Array(N * N)
-  const came = new Int32Array(N * N)
-  const seen = new Uint32Array(N * N)
-  let stamp = 0
-  // Binary heap of [f, cell].
-  const heapF: number[] = []
-  const heapC: number[] = []
-  const push = (f: number, c: number) => {
-    let i = heapF.length
-    heapF.push(f)
-    heapC.push(c)
-    while (i > 0) {
-      const p = (i - 1) >> 1
-      if (heapF[p]! <= f) break
-      heapF[i] = heapF[p]!
-      heapC[i] = heapC[p]!
-      i = p
-    }
-    heapF[i] = f
-    heapC[i] = c
-  }
-  const pop = () => {
-    const top = heapC[0]!
-    const lf = heapF.pop()!
-    const lc = heapC.pop()!
-    if (heapF.length) {
-      let i = 0
-      for (;;) {
-        const l = 2 * i + 1
-        if (l >= heapF.length) break
-        const r = l + 1
-        const m = r < heapF.length && heapF[r]! < heapF[l]! ? r : l
-        if (heapF[m]! >= lf) break
-        heapF[i] = heapF[m]!
-        heapC[i] = heapC[m]!
-        i = m
-      }
-      heapF[i] = lf
-      heapC[i] = lc
-    }
-    return top
-  }
-
-  const DIRS = [
-    [1, 0, 1],
-    [-1, 0, 1],
-    [0, 1, 1],
-    [0, -1, 1],
-    [1, 1, Math.SQRT2],
-    [1, -1, Math.SQRT2],
-    [-1, 1, Math.SQRT2],
-    [-1, -1, Math.SQRT2],
-  ] as const
-
-  const astar = (s: number, t: number): number[] => {
-    stamp++
-    heapF.length = 0
-    heapC.length = 0
+  #astar(s: number, t: number): number[] {
+    const N = this.#n
+    const open = this.#open
+    const g = this.#g
+    const came = this.#came
+    const seen = this.#seen
+    const heap = this.#heap
+    const stamp = ++this.#stamp
+    heap.clear()
     const tx = t % N
     const tz = (t - tx) / N
     const h = (c: number) => {
@@ -138,10 +214,10 @@ export const createNav = (map: MobaMap) => {
     seen[s] = stamp
     g[s] = 0
     came[s] = -1
-    push(h(s), s)
+    heap.push(h(s), s)
     let expanded = 0
-    while (heapF.length && expanded < 20000) {
-      const c = pop()
+    while (heap.size && expanded < MAX_EXPANDED) {
+      const c = heap.pop()
       expanded++
       if (c === t) break
       const cx = c % N
@@ -158,7 +234,7 @@ export const createNav = (map: MobaMap) => {
           seen[n] = stamp
           g[n] = ng
           came[n] = c
-          push(ng + h(n), n)
+          heap.push(ng + h(n), n)
         }
       }
     }
@@ -167,40 +243,7 @@ export const createNav = (map: MobaMap) => {
     for (let c = t; c !== -1; c = came[c]!) out.push(c)
     return out.toReversed()
   }
-
-  const cache = new Map<number, readonly Vec2[]>()
-
-  const path = (from: Vec2, to: Vec2): readonly Vec2[] => {
-    const s = snap(cellOf(from))
-    const t = snap(cellOf(to))
-    if (s === t || clear(s, t)) return [to]
-    const key = s * N * N + t
-    const hit = cache.get(key)
-    if (hit) return hit
-    const cells = astar(s, t)
-    if (cells.length === 0) return [to]
-    // String-pull: keep only cells needed to stay in line of sight.
-    const pts: number[] = []
-    let anchor = cells[0]!
-    for (let i = 1; i < cells.length; i++) {
-      if (!clear(anchor, cells[i]!)) {
-        anchor = cells[i - 1]!
-        pts.push(anchor)
-      }
-    }
-    const result = [
-      ...pts.map((c) => {
-        const x = c % N
-        return { x: x + 0.5, z: (c - x) / N + 0.5 }
-      }),
-      to,
-    ]
-    if (cache.size > 4000) cache.clear()
-    cache.set(key, result)
-    return result
-  }
-
-  return { path, walkable: (p: Vec2) => open[cellOf(p)] === 1 }
 }
 
-export type Nav = ReturnType<typeof createNav>
+/** @deprecated Prefer `new Nav(map)`. */
+export const createNav = (map: MobaMap): Nav => new Nav(map)
