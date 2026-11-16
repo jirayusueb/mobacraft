@@ -21,7 +21,7 @@ import {
   vec3,
 } from "three/tsl"
 import { CLIFF, GROUND_GRADE, TERRAIN_COLOR } from "../palette.ts"
-import { CORNER_OFFSET, EDGE_DIR, createCornerCuts } from "./corner-cuts.ts"
+import { CORNER_OFFSET, CornerCuts, EDGE_DIR } from "./corner-cuts.ts"
 
 /** Depth of the island slab below ground — the visible "diorama" cross-section. */
 export const ISLAND_BOTTOM = -6
@@ -142,7 +142,7 @@ export const buildTerrain = (map: MobaMap): Mesh => {
     tx < 0 || tz < 0 || tx >= N || tz >= N ? ISLAND_BOTTOM : map.height[tz * N + tx]!
 
   const UP = [0, 1, 0] as const
-  const cutAt = createCornerCuts(map)
+  const cuts = new CornerCuts(map)
   const lip = new Color()
 
   type Sample = ReturnType<typeof corner>
@@ -212,12 +212,12 @@ export const buildTerrain = (map: MobaMap): Mesh => {
         const q = corners[(k + 1) % 4]!
         return { x: (p.x + q.x) / 2, z: (p.z + q.z) / 2, s: lerpSample(p.s, q.s, 0.5) }
       }
-      const cuts = [0, 1, 2, 3].map((k) => cutAt(tx, tz, k))
+      const tileCuts = [0, 1, 2, 3].map((k) => cuts.at(tx, tz, k))
 
       // Top polygon in circulation order, with bevelled corners.
       const poly: Pt[] = []
       for (let k = 0; k < 4; k++) {
-        if (cuts[k]) poly.push(mid((k + 3) % 4), mid(k))
+        if (tileCuts[k]) poly.push(mid((k + 3) % 4), mid(k))
         else poly.push(corners[k]!)
       }
       const centre: Pt = {
@@ -237,7 +237,7 @@ export const buildTerrain = (map: MobaMap): Mesh => {
 
       // Bevel walls + fill triangles for cut corners.
       for (let k = 0; k < 4; k++) {
-        const cut = cuts[k]
+        const cut = tileCuts[k]
         if (!cut) continue
         const m0 = mid((k + 3) % 4)
         const m1 = mid(k)
@@ -262,8 +262,8 @@ export const buildTerrain = (map: MobaMap): Mesh => {
         const [dx, dz] = EDGE_DIR[k]!
         const nh = heightOf(tx + dx, tz + dz)
         if (nh >= h) continue
-        const p = cuts[k] ? mid(k) : corners[k]!
-        const q = cuts[(k + 1) % 4] ? mid(k) : corners[(k + 1) % 4]!
+        const p = tileCuts[k] ? mid(k) : corners[k]!
+        const q = tileCuts[(k + 1) % 4] ? mid(k) : corners[(k + 1) % 4]!
         if (p.x === q.x && p.z === q.z) continue
         wall(p, q, h, nh, [dx, 0, dz], i)
       }

@@ -34,16 +34,22 @@ export interface CornerCut {
   readonly fillTile: number
 }
 
-export const createCornerCuts = (map: MobaMap) => {
-  const N = map.size
-  const inside = (x: number, z: number) => x >= 0 && z >= 0 && x < N && z < N
-  const cache = new Map<number, CornerCut | null>()
+export class CornerCuts {
+  readonly #map: MobaMap
+  readonly #cache = new Map<number, CornerCut | null>()
+
+  constructor(map: MobaMap) {
+    this.#map = map
+  }
 
   /** The cut at corner `k` of tile `(tx, tz)`, or null if the corner stays square. */
-  const cutAt = (tx: number, tz: number, k: number): CornerCut | null => {
+  at(tx: number, tz: number, k: number): CornerCut | null {
+    const map = this.#map
+    const N = map.size
     const key = (tz * N + tx) * 4 + k
-    const hit = cache.get(key)
+    const hit = this.#cache.get(key)
     if (hit !== undefined) return hit
+    const inside = (x: number, z: number) => x >= 0 && z >= 0 && x < N && z < N
     const h = map.height[tz * N + tx]!
     const [ax, az] = EDGE_DIR[(k + 3) % 4]!
     const [bx, bz] = EDGE_DIR[k]!
@@ -63,8 +69,7 @@ export const createCornerCuts = (map: MobaMap) => {
         result = { fillHeight: Math.max(ha, hb), fillTile }
       }
     }
-    cache.set(key, result)
+    this.#cache.set(key, result)
     return result
   }
-  return cutAt
 }
