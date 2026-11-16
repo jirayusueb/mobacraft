@@ -18,6 +18,7 @@ import { Context, Effect, Layer, Stream, SubscriptionRef } from "effect"
 import { WebGPURenderer } from "three/webgpu"
 import { CREATURE_NAME, type Population } from "@mobacraft/sim"
 import { CameraRig } from "./camera-rig.ts"
+import { FpsMeter, HeldKeys } from "./input-state.ts"
 import { RendererInitError } from "./errors.ts"
 import { createWorld, type Picked } from "./world.ts"
 
@@ -180,8 +181,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
   let drag: { x: number; y: number; moved: number } | null = null
   /** Creature id the camera is tracking, if any. */
   let following: string | null = null
-  const keys = new Set<string>()
-  const held = (a: string, b: string) => (keys.has(a) || keys.has(b) ? 1 : 0)
+  const keys = new HeldKeys()
 
   yield* listen(canvas, "pointerdown", (e) => {
     canvas.setPointerCapture(e.pointerId)
@@ -237,22 +237,20 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     if (e.key === "q" || e.key === "Q") rig.rotate(-1)
     else if (e.key === "e" || e.key === "E") rig.rotate(1)
     else if (e.key === "h" || e.key === "H") rig.home()
-    else keys.add(e.key.toLowerCase())
+    else keys.press(e.key)
   })
-  yield* listen(window, "keyup", (e) => keys.delete(e.key.toLowerCase()))
+  yield* listen(window, "keyup", (e) => keys.release(e.key))
   yield* listen(window, "blur", () => keys.clear())
 
   // --- frame loop --------------------------------------------------------------
   let last = performance.now()
-  let fpsAcc = 0
-  let fpsFrames = 0
+  const meter = new FpsMeter()
   const frame = (now: number) => {
     const dt = Math.min(0.1, (now - last) / 1000)
     last = now
 
     const pan = 40 * dt * (1 / rig.pose().zoom)
-    const right = held("d", "arrowright") - held("a", "arrowleft")
-    const up = held("w", "arrowup") - held("s", "arrowdown")
+    const { right, up } = keys.panAxes()
     if (right || up) rig.panScreen(right * pan, up * pan)
 
     world.tick(dt)
@@ -266,13 +264,9 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     world.applyPose(rig.pose())
     world.render()
 
-    fpsAcc += dt
-    fpsFrames++
-    if (fpsAcc >= 0.5) {
-      local.fps = Math.round(fpsFrames / fpsAcc)
+    if (meter.tick(dt)) {
+      local.fps = meter.fps
       local.drawCalls = world.stats().calls
-      fpsAcc = 0
-      fpsFrames = 0
     }
 
     const next = snapshot()
