@@ -1,0 +1,2 @@
+2026-11-17 locomotion slice: two sessions drafting overlapping specs both numbered 09 — spec numbering should be claimed (commit) before drafting, or the gate script should warn on duplicate titles.
+2026-11-17 locomotion slice: concurrent uncommitted edits to match.ts by a second session blocked the full `make test` gate; integration deferred instead of fighting the tree.
