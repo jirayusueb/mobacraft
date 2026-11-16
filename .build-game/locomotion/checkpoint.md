@@ -1,9 +1,16 @@
 # spec/11 locomotion nav layer — checkpoint
 
-- spec drafted (orig. 09), fresh-context reviewed FAIL → resolved, committed as spec/11.
+- spec committed as spec/11 (orig. drafted as 09; see dedupe section in the spec).
 - locomotion.ts + locomotion.test.ts committed (835a848), 14/14 green.
-- Integration into match.ts (DynamicNav swap, cutTree feed, turn rates in add())
-  DEFERRED: parallel spec/09 crowd session owns match.ts right now and already
-  consumes FREE_PATH_T/freePath/velMag. See spec/11 "Relationship to spec/09".
-- Next step (when match.ts is free): the deferred integration slice, then
-  run make test + re-baseline any trajectory snapshots once.
+- Integration INTO match.ts DONE in the working tree (2026-11-17 01:03):
+  createNav → DynamicNav, turn-gated stepToward via moveBody, radius-aware
+  travel with ignoreForest, cutTree/regrowTree feeds, dash + knockback set
+  freePath, phase/freePath decay, turn rates in add().
+- Evidence: full `make test` gate PASS (4/4 tasks, 149 sim tests incl. the
+  spec/09 think suite, 2m34s). Earlier failures were races with the
+  concurrent spec/09/12 session's mid-edit states, not regressions.
+- NOT committed: match.ts also carries the other session's uncommitted
+  think/brain/inventory work (~900 lines); that session commits its own
+  tree — my integration rides along in their next commit. Do NOT
+  re-integrate or revert; verify with `bun test src/match/match.test.ts`
+  after their commit lands.
