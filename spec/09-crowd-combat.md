@@ -183,3 +183,33 @@ Where this section and §1–§6 disagree, this section wins.
     budget: `crowdStep` mean ≤ 2 ms at ~150 bodies, measured in the match test
     run. Stacked spawns are separated by ORCA's overlap branch, which removes
     overlap within one step, split by share.
+
+## Implementation verdict — PASS (commit 40c13f2)
+
+Drift from the spec, found while making the acceptance tests pass:
+
+- **ORCA τ = 0.4 s** (spec said 1.0). With 1.0 s the outer attackers in an
+  8-melee scrum stood off for 5–6 s. With 0.4 s all 8 swing by 3.6 s.
+- **Slot clamp**: a slot is pulled to at most `reach − 0.15`, because ring 1
+  sits at exactly reach for range-1.2 units. `REACH_EPS = 0.05` absorbs
+  float noise in the in-reach test.
+- **Slot drift**: in-reach attackers settle into their reserved slot between
+  swings, which frees the ring edge for late arrivals.
+- **Orbit approach**: a slot more than 45° around the target is approached via
+  an outer orbit (radius tR + 1.6…2.2). The direction is fixed at reservation,
+  so the approach never flip-flops.
+- **Idle teammates are not steering blockers**: movers walk at them and they
+  yield (§6).
+- **Terrain wedge repath**: a mover that wants to move, isn't moving, and
+  isn't touching a body re-runs A* after 0.5 s, with a 2 s backoff. A mover
+  already inside forest may step anywhere to escape.
+
+Evidence:
+
+- `crowd.test.ts` 23 tests: ORCA, steering, yield, rings, phases.
+- `crowd-arena.test.ts` 4 tests: 8-melee arena, corridor + yield, DPS parity,
+  motion buffer.
+- Full sim suite 191/191.
+- Seed 7 (AI vs AI): 21.5 min vs 21.0 baseline, 22.4k swings landed, 409
+  cancelled (1.8 %, target died or left the buffer). crowdStep costs 0.04 ms
+  per tick at ~83 movers.
