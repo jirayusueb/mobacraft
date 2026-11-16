@@ -24,6 +24,7 @@ import {
   Vector3,
 } from "three/webgpu"
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
+import { type BoundPart, bindJoints, type Joint, type JointKind, transformPivots } from "./rig.ts"
 
 type Vec = readonly [number, number, number]
 interface Place {
@@ -34,6 +35,7 @@ interface Place {
 interface PartOpts {
   glow?: number
   limb?: number
+  joint?: JointKind
 }
 
 const tmpM = new Matrix4()
@@ -46,7 +48,14 @@ const UP = new Vector3(0, 1, 0)
 
 /** Collects coloured parts and merges them into one flat-shaded geometry. */
 class Model {
-  private readonly parts: BufferGeometry[] = []
+  private readonly parts: BoundPart[] = []
+  private readonly joints: Joint[] = []
+
+  /** Declare a joint the limb group `limb` pivots around. */
+  joint(kind: JointKind, limb: number, at: Vec): this {
+    this.joints.push({ kind, limb, at })
+    return this
+  }
 
   /** Add a primitive with an optional scale → rotate → translate placement. */
   add(geo: BufferGeometry, hex: number, place: Place = {}, opts: PartOpts = {}): this {
@@ -78,10 +87,18 @@ class Model {
     return this.push(orient(new ConeGeometry(r, len, n), a, b), hex, opts)
   }
 
-  build(): BufferGeometry {
-    const merged = mergeGeometries(this.parts, false)
+  build(scale = 1): BufferGeometry {
+    bindJoints(this.parts, this.joints)
+    const merged = mergeGeometries(
+      this.parts.map((p) => p.geo),
+      false,
+    )
     if (!merged) throw new Error("kit-lane: merge failed")
-    for (const p of this.parts) p.dispose()
+    for (const p of this.parts) p.geo.dispose()
+    if (scale !== 1) {
+      merged.scale(scale, scale, scale)
+      transformPivots(merged, scale)
+    }
     merged.computeVertexNormals()
     merged.computeBoundingBox()
     merged.computeBoundingSphere()
@@ -104,7 +121,7 @@ class Model {
     g.setAttribute("color", new Float32BufferAttribute(col, 3))
     g.setAttribute("glow", new Float32BufferAttribute(new Float32Array(n).fill(opts.glow ?? 0), 1))
     g.setAttribute("limb", new Float32BufferAttribute(new Float32Array(n).fill(opts.limb ?? 0), 1))
-    this.parts.push(g)
+    this.parts.push({ geo: g, limb: opts.limb ?? 0, joint: opts.joint })
     return this
   }
 }
@@ -178,6 +195,7 @@ const melee = (t: Team, dire: boolean): BufferGeometry => {
 
   for (const s of SIDES) {
     const limb = legLimb(s)
+    m.joint("leg", limb, [s * 0.085, 0.28, 0])
     m.beam([s * 0.085, 0.28, 0], [s * 0.09, 0.06, 0.01], 0.1, 0.11, t.armourDark, { limb })
     m.add(new BoxGeometry(0.13, 0.07, 0.17), t.leather, { at: [s * 0.09, 0.035, 0.025] }, { limb })
     // knee guard
@@ -232,12 +250,13 @@ const melee = (t: Team, dire: boolean): BufferGeometry => {
   // Arms
   for (const s of SIDES) {
     const limb = armLimb(s)
+    m.joint("arm", limb, [s * 0.23, 0.52, 0])
     m.beam([s * 0.23, 0.52, 0], [s * 0.25, 0.34, 0.06], 0.085, 0.085, t.armourDark, { limb })
     m.add(new BoxGeometry(0.095, 0.09, 0.1), t.leather, { at: [s * 0.25, 0.32, 0.07] }, { limb })
   }
 
   // Shield — left arm (+x)
-  const sh = { limb: armLimb(1) }
+  const sh = { limb: armLimb(1), joint: "arm" } as const
   if (dire) {
     m.add(
       new BoxGeometry(0.05, 0.32, 0.24),
@@ -270,7 +289,7 @@ const melee = (t: Team, dire: boolean): BufferGeometry => {
   }
 
   // Weapon — right arm (−x)
-  const wp = { limb: armLimb(-1) }
+  const wp = { limb: armLimb(-1), joint: "arm" } as const
   if (dire) {
     m.beam([-0.25, 0.22, 0.04], [-0.27, 0.66, 0.2], 0.045, 0.045, t.wood, wp)
     m.add(
@@ -320,6 +339,7 @@ const ranged = (t: Team, dire: boolean): BufferGeometry => {
 
   for (const s of SIDES) {
     const limb = legLimb(s)
+    m.joint("leg", limb, [s * 0.07, 0.18, 0])
     m.beam([s * 0.07, 0.18, 0], [s * 0.075, 0.05, 0.02], 0.08, 0.09, t.leather, { limb })
     m.add(new BoxGeometry(0.1, 0.06, 0.15), t.leather, { at: [s * 0.075, 0.03, 0.04] }, { limb })
   }
@@ -365,6 +385,7 @@ const ranged = (t: Team, dire: boolean): BufferGeometry => {
   // Sleeves
   for (const s of SIDES) {
     const limb = armLimb(s)
+    m.joint("arm", limb, [s * 0.17, 0.53, 0])
     m.seg([s * 0.17, 0.53, 0], [s * 0.21, 0.36, 0.08], 0.05, 0.065, 5, t.cloth, { limb })
     m.add(new BoxGeometry(0.07, 0.07, 0.07), t.leather, { at: [s * 0.21, 0.33, 0.09] }, { limb })
   }
@@ -373,18 +394,13 @@ const ranged = (t: Team, dire: boolean): BufferGeometry => {
     new OctahedronGeometry(0.04),
     t.eye,
     { at: [0.22, 0.27, 0.12] },
-    { glow: 1, limb: armLimb(1) },
+    { glow: 1, limb: armLimb(1), joint: "arm" },
   )
 
   // Staff in right hand (−x)
-  const st = { limb: armLimb(-1) }
+  const st = { limb: armLimb(-1), joint: "arm" } as const
   m.beam([-0.22, 0.04, 0.1], [-0.235, 0.7, 0.13], 0.045, 0.045, t.wood, st)
-  m.add(
-    new IcosahedronGeometry(0.065),
-    t.eye,
-    { at: [-0.235, 0.77, 0.13] },
-    { glow: 1, limb: st.limb },
-  )
+  m.add(new IcosahedronGeometry(0.065), t.eye, { at: [-0.235, 0.77, 0.13] }, { glow: 1, ...st })
   for (let i = 0; i < 3; i++) {
     const a = (i / 3) * Math.PI * 2
     const dx = Math.sin(a) * 0.07
@@ -398,7 +414,7 @@ const ranged = (t: Team, dire: boolean): BufferGeometry => {
     )
   }
   // Authored slightly large for proportion; normalise so the staff orb tops out ≈0.72.
-  return m.build().scale(0.86, 0.86, 0.86)
+  return m.build(0.86)
 }
 
 // ── Siege engines (≈0.9 tall, ≈1.3 long) ────────────────────────────────────
@@ -407,6 +423,7 @@ const wheels = (m: Model, tire: number, hub: number, spikes: number | undefined)
   for (const s of SIDES)
     for (const z of [0.36, -0.36]) {
       const limb = z > 0 ? 1 : -1
+      m.joint("wheel", limb, [s * 0.34, 0.2, z])
       m.add(
         new CylinderGeometry(0.2, 0.2, 0.09, 8),
         tire,
@@ -481,7 +498,9 @@ const direSiege = (): BufferGeometry => {
   }
   m.add(new BoxGeometry(0.46, 0.07, 0.08), t.armour, { at: [0, 0.71, 0.08] })
   // Throwing arm (limb +1) cocked back, ember boulder in bucket
-  const arm = { limb: 1 }
+  // Lever pivots on the axle; shares limb +1 with the front wheels, so pin the kind.
+  m.joint("lever", 1, [0, 0.46, 0.18])
+  const arm = { limb: 1, joint: "lever" } as const
   m.add(
     new CylinderGeometry(0.06, 0.06, 0.4, 6),
     t.armour,
@@ -490,7 +509,7 @@ const direSiege = (): BufferGeometry => {
   )
   m.beam([0, 0.46, 0.2], [0, 0.62, -0.46], 0.08, 0.07, t.wood, arm)
   m.add(new CylinderGeometry(0.15, 0.09, 0.1, 6), t.armour, { at: [0, 0.66, -0.5] }, arm)
-  m.add(new IcosahedronGeometry(0.12), t.eye, { at: [0, 0.76, -0.5] }, { glow: 1, limb: 1 })
+  m.add(new IcosahedronGeometry(0.12), t.eye, { at: [0, 0.76, -0.5] }, { glow: 1, ...arm })
   m.add(new DodecahedronGeometry(0.1), 0x2a2224, { at: [0.04, 0.73, -0.47] }, arm)
   // Tattered rust banner on a bone pole
   m.beam([0.22, 0.4, -0.46], [0.22, 0.92, -0.46], 0.045, 0.045, t.trim)
@@ -514,6 +533,7 @@ const roshan = (): BufferGeometry => {
   // Legs — thick, bowed
   for (const s of SIDES) {
     const limb = legLimb(s)
+    m.joint("leg", limb, [s * 0.52, 1.2, -0.2])
     m.seg([s * 0.52, 1.2, -0.2], [s * 0.64, 0.62, 0.08], 0.32, 0.25, 6, HIDE, { limb })
     m.seg([s * 0.64, 0.62, 0.08], [s * 0.6, 0.14, -0.04], 0.22, 0.18, 6, DARK, { limb })
     m.add(
@@ -590,6 +610,7 @@ const roshan = (): BufferGeometry => {
   // Arms — knuckle-dragging, clawed
   for (const s of SIDES) {
     const limb = armLimb(s)
+    m.joint("arm", limb, [s * 1.05, 2.4, 0.05])
     m.seg([s * 1.05, 2.4, 0.05], [s * 1.2, 1.5, 0.3], 0.27, 0.22, 6, HIDE, { limb })
     m.seg([s * 1.2, 1.5, 0.3], [s * 1.15, 0.58, 0.55], 0.25, 0.28, 6, DARK, { limb })
     // Bone bracer + spike

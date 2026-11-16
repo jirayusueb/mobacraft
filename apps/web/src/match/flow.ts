@@ -6,6 +6,7 @@
  *      └──────────────── exit ◀── results ◀──────(winner)───────────────────────┘
  */
 import type { DraftSide, DraftState, MatchSnapshot } from "@mobacraft/sim"
+import type { MatchHistory } from "./hud-data.ts"
 
 export type Screen =
   | { readonly _tag: "explore" }
@@ -22,13 +23,19 @@ export type Screen =
       readonly draft: DraftState
       readonly you: DraftSide
       readonly final: MatchSnapshot
+      /** Sampled during the match by the HUD (gold-lead graph). */
+      readonly history?: MatchHistory
     }
 
 export type FlowEvent =
   | { readonly _tag: "start" }
   | { readonly _tag: "chosen"; readonly draft: DraftState; readonly you: DraftSide }
   | { readonly _tag: "drafted"; readonly draft: DraftState; readonly seed: number }
-  | { readonly _tag: "finished"; readonly final: MatchSnapshot }
+  | {
+      readonly _tag: "finished"
+      readonly final: MatchSnapshot
+      readonly history?: MatchHistory
+    }
   | { readonly _tag: "exit" }
 
 export const next = (s: Screen, e: FlowEvent): Screen => {
@@ -41,7 +48,7 @@ export const next = (s: Screen, e: FlowEvent): Screen => {
       return s._tag === "draft" ? { _tag: "match", draft: e.draft, you: s.you, seed: e.seed } : s
     case "finished":
       return s._tag === "match"
-        ? { _tag: "results", draft: s.draft, you: s.you, final: e.final }
+        ? { _tag: "results", draft: s.draft, you: s.you, final: e.final, history: e.history }
         : s
     case "exit":
       return { _tag: "explore" }

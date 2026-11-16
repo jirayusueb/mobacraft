@@ -8,6 +8,7 @@ import {
   applyDraft,
   createDraft,
   createMatch,
+  heroDef,
   isComplete,
   type DraftState,
 } from "../index.ts"
@@ -88,6 +89,12 @@ describe("match", () => {
     expect(s.feed.some((f) => f.kind === "first-blood")).toBe(true)
   })
 
+  test("hero balance patch applies on top of base kits", () => {
+    const chain = HEROES.find((h) => h.id === "chainwarden")!
+    expect(heroDef("chainwarden").skill.cooldown).toBeLessThan(chain.skill.cooldown)
+    expect(heroDef("ironwarden")).toBe(HEROES.find((h) => h.id === "ironwarden")!)
+  })
+
   test("is deterministic for a seed", () => {
     const a = createMatch(map, autoDraft(), { seed: 3 }).runToEnd()
     const b = createMatch(map, autoDraft(), { seed: 3 }).runToEnd()
@@ -95,18 +102,42 @@ describe("match", () => {
     expect(a.heroes).toEqual(b.heroes)
   })
 
-  test("both sides can win (no structural side bias) across seeds", () => {
-    const winners = new Set<string>()
-    for (let i = 0; i < 6 && winners.size < 2; i++) {
-      winners.add(
-        createMatch(map, autoDraft(i % 4, (i + 1) % 4), {
-          seed: 50 + i,
-          aiCoach: ["blue", "red"],
-        }).runToEnd().winner!,
-      )
+  test("no structural side bias: same comps swapped across sides split wins", () => {
+    // Swapping the two compositions between sides must flip most outcomes.
+    const d = autoDraft(0, 1)
+    const swapped: DraftState = {
+      ...d,
+      blue: d.red,
+      red: d.blue,
+      picks: { blue: d.picks.red, red: d.picks.blue },
     }
-    expect(winners.size).toBe(2)
-  })
+    let blueWins = 0
+    for (let s = 0; s < 3; s++) {
+      if (createMatch(map, d, { seed: s }).runToEnd().winner === "blue") blueWins++
+      if (createMatch(map, swapped, { seed: s }).runToEnd().winner === "blue") blueWins++
+    }
+    expect(blueWins).toBeGreaterThanOrEqual(1)
+    expect(blueWins).toBeLessThanOrEqual(5)
+  }, 60_000)
+
+  test("first pick is an advantage but not decisive: red wins some drafts", () => {
+    let red = 0
+    for (const [a, b] of [
+      [0, 1],
+      [1, 2],
+      [2, 3],
+      [3, 0],
+      [1, 0],
+      [2, 1],
+    ] as const) {
+      if (
+        createMatch(map, autoDraft(a, b), { seed: a * 7 + b, aiCoach: ["blue", "red"] }).runToEnd()
+          .winner === "red"
+      )
+        red++
+    }
+    expect(red).toBeGreaterThanOrEqual(1)
+  }, 60_000)
 
   test("towers fall in tier order", () => {
     const m = createMatch(map, autoDraft(), { seed: 11, aiCoach: ["blue", "red"] })

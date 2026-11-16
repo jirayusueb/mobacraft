@@ -29,6 +29,7 @@ import {
   Vector3,
 } from "three/webgpu"
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
+import { type BoundPart, bindJoints, type Joint, type JointKind, transformPivots } from "./rig.ts"
 
 type Vec = readonly [number, number, number]
 interface Place {
@@ -39,6 +40,8 @@ interface Place {
 interface PartOpts {
   glow?: number
   limb?: number
+  /** Bind to this joint kind only (default: nearest joint of the limb group). */
+  joint?: JointKind
 }
 
 const tmpM = new Matrix4()
@@ -52,7 +55,14 @@ const PI = Math.PI
 
 /** Collects coloured parts and merges them into one flat-shaded geometry. */
 class Model {
-  private readonly parts: BufferGeometry[] = []
+  private readonly parts: BoundPart[] = []
+  private readonly joints: Joint[] = []
+
+  /** Declare a joint the limb group `limb` pivots around. */
+  joint(kind: JointKind, limb: number, at: Vec): this {
+    this.joints.push({ kind, limb, at })
+    return this
+  }
 
   /** Add a primitive with an optional scale → rotate → translate placement. */
   add(geo: BufferGeometry, hex: number, place: Place = {}, opts: PartOpts = {}): this {
@@ -88,13 +98,20 @@ class Model {
   }
 
   build(): BufferGeometry {
-    const merged = mergeGeometries(this.parts, false)
+    bindJoints(this.parts, this.joints)
+    const merged = mergeGeometries(
+      this.parts.map((p) => p.geo),
+      false,
+    )
     if (!merged) throw new Error("kit-hero: merge failed")
-    for (const p of this.parts) p.dispose()
+    for (const p of this.parts) p.geo.dispose()
     merged.computeBoundingBox()
     // Snap the lowest point (boots / hem) onto the ground plane.
     const minY = merged.boundingBox?.min.y ?? 0
-    if (minY !== 0) merged.translate(0, -minY, 0)
+    if (minY !== 0) {
+      merged.translate(0, -minY, 0)
+      transformPivots(merged, 1, -minY)
+    }
     merged.computeVertexNormals()
     merged.computeBoundingBox()
     merged.computeBoundingSphere()
@@ -117,7 +134,7 @@ class Model {
     g.setAttribute("color", new Float32BufferAttribute(col, 3))
     g.setAttribute("glow", new Float32BufferAttribute(new Float32Array(n).fill(opts.glow ?? 0), 1))
     g.setAttribute("limb", new Float32BufferAttribute(new Float32Array(n).fill(opts.limb ?? 0), 1))
-    this.parts.push(g)
+    this.parts.push({ geo: g, limb: opts.limb ?? 0, joint: opts.joint })
     return this
   }
 }
@@ -203,6 +220,7 @@ const hand = (f: Frame, s: number): Vec => [s * (f.shW + 0.05), f.shY - 0.4, 0.1
 const legsOf = (m: Model, f: Frame, leg: number, boot: number) => {
   for (const s of SIDES) {
     const limb = legLimb(s)
+    m.joint("leg", limb, [s * f.hipW, f.hipY, 0])
     m.beam([s * f.hipW, f.hipY, 0], [s * f.hipW * 1.08, 0.09, 0.02], f.legW, f.legW * 1.1, leg, {
       limb,
     })
@@ -217,6 +235,7 @@ const legsOf = (m: Model, f: Frame, leg: number, boot: number) => {
 
 /** Tiny feet hidden under a robe so gait still reads. */
 const robeFeet = (m: Model, boot: number) => {
+  for (const s of SIDES) m.joint("leg", legLimb(s), [s * 0.08, 0.3, 0.04])
   for (const s of SIDES)
     m.add(
       new BoxGeometry(0.1, 0.07, 0.16),
@@ -229,6 +248,7 @@ const robeFeet = (m: Model, boot: number) => {
 const armsOf = (m: Model, f: Frame, upper: number, fore: number, fist: number) => {
   for (const s of SIDES) {
     const limb = armLimb(s)
+    m.joint("arm", limb, [s * f.shW, f.shY, 0])
     const elbow: Vec = [s * (f.shW + 0.035), f.shY - 0.2, 0.0]
     const h = hand(f, s)
     m.seg([s * f.shW, f.shY, 0], elbow, f.armW, f.armW * 0.9, 5, upper, { limb })
@@ -399,6 +419,7 @@ const brute = (p: Pal, id: string): BufferGeometry => {
     // Root legs splaying into the ground
     for (const s of SIDES) {
       const limb = legLimb(s)
+      m.joint("leg", limb, [s * 0.15, 0.55, 0])
       m.seg([s * 0.15, 0.55, 0], [s * 0.2, 0.08, 0.03], 0.13, 0.15, 5, p.body, { limb })
       for (const d of [-1, 0, 1])
         m.spike(
@@ -432,6 +453,7 @@ const brute = (p: Pal, id: string): BufferGeometry => {
     // Branch arms ending in twig claws
     for (const s of SIDES) {
       const limb = armLimb(s)
+      m.joint("arm", limb, [s * 0.38, 1.02, 0])
       const el: Vec = [s * 0.48, 0.78, 0.02]
       const h: Vec = [s * 0.5, 0.45, 0.16]
       m.seg([s * 0.38, 1.02, 0], el, 0.1, 0.085, 5, p.body, { limb })
@@ -458,6 +480,7 @@ const brute = (p: Pal, id: string): BufferGeometry => {
   // Squat legs, belly, hunched slab torso
   for (const s of SIDES) {
     const limb = legLimb(s)
+    m.joint("leg", limb, [s * 0.16, 0.5, 0])
     m.seg([s * 0.16, 0.5, 0], [s * 0.18, 0.1, 0.03], 0.13, 0.11, 5, p.bodyDark, { limb })
     m.add(new BoxGeometry(0.2, 0.11, 0.26), p.dark, { at: [s * 0.18, 0.055, 0.06] }, { limb })
   }
@@ -476,6 +499,7 @@ const brute = (p: Pal, id: string): BufferGeometry => {
   // Gorilla arms: knuckles near the knees
   for (const s of SIDES) {
     const limb = armLimb(s)
+    m.joint("arm", limb, [s * 0.42, 0.98, 0])
     const el: Vec = [s * 0.5, 0.75, 0.04]
     const h: Vec = [s * 0.5, 0.4, 0.18]
     m.seg([s * 0.42, 0.98, 0], el, 0.11, 0.1, 5, p.skin, { limb })
@@ -782,6 +806,7 @@ const robeBase = (m: Model, p: Pal, f: Frame, robe: number, trim: number) => {
   for (const s of SIDES) {
     const limb = armLimb(s)
     const h = hand(f, s)
+    m.joint("arm", limb, [s * f.shW, f.shY, 0])
     m.seg([s * f.shW, f.shY, 0], [h[0], h[1] + 0.06, h[2] - 0.02], 0.06, 0.09, 5, robe, { limb })
     m.add(new BoxGeometry(0.07, 0.07, 0.07), p.skin, { at: h }, { limb })
   }
@@ -1040,6 +1065,7 @@ const quadLegs = (
       [zb, false],
     ] as const) {
       const limb = s > 0 === front ? 1 : -1
+      m.joint("leg", limb, [s * x, top, z])
       m.seg([s * x, top, z], [s * x * 1.05, 0.08, z + 0.03], r, r * 0.75, 5, col, { limb })
       m.add(
         new BoxGeometry(r * 1.7, 0.08, r * 2.2),
@@ -1057,6 +1083,7 @@ const beast = (p: Pal, id: string): BufferGeometry => {
     // Upright hunched ravager: digitigrade legs, massive bone claws, tusks, spine ridge
     for (const s of SIDES) {
       const limb = legLimb(s)
+      m.joint("leg", limb, [s * 0.14, 0.5, -0.02])
       m.seg([s * 0.14, 0.5, -0.02], [s * 0.17, 0.28, 0.12], 0.11, 0.08, 5, p.body, { limb })
       m.seg([s * 0.17, 0.28, 0.12], [s * 0.17, 0.08, -0.02], 0.08, 0.06, 5, p.bodyDark, { limb })
       m.add(new BoxGeometry(0.13, 0.08, 0.2), p.dark, { at: [s * 0.17, 0.04, 0.04] }, { limb })
@@ -1082,6 +1109,7 @@ const beast = (p: Pal, id: string): BufferGeometry => {
       m.spike([0, y, z], [0, y + 0.12, z - 0.14], 0.06, p.accent)
     for (const s of SIDES) {
       const limb = armLimb(s)
+      m.joint("arm", limb, [s * 0.33, 0.9, 0.04])
       m.add(new IcosahedronGeometry(0.15), p.body, {
         at: [s * 0.32, 0.93, 0.04],
         scale: [1.1, 0.9, 1],

@@ -38,7 +38,7 @@ const TEAM_SIDE: Record<Team, DraftSide> = { radiant: "blue", dire: "red" }
 const XP_CURVE = [
   0, 200, 450, 750, 1100, 1500, 1950, 2450, 3000, 3600, 4250, 4950, 5700, 6500, 7350,
 ]
-const MAX_LEVEL = XP_CURVE.length
+export const MAX_LEVEL = XP_CURVE.length
 const PASSIVE_GOLD = 2.2 // per second
 const CREEP_GOLD = 38
 const CREEP_XP = 55
@@ -50,11 +50,11 @@ const NEUTRAL_GOLD = 55
 const NEUTRAL_XP = 70
 const ROSHAN_GOLD = 200
 const XP_RANGE = 9
-const RESPAWN_BASE = 6
-const RESPAWN_PER_LEVEL = 2.2
+export const RESPAWN_BASE = 6
+export const RESPAWN_PER_LEVEL = 2.2
 const WAVE_INTERVAL = 30
 const CAMP_RESPAWN = 60
-const ROSHAN_RESPAWN = 240
+export const ROSHAN_RESPAWN = 240
 
 type UnitType = "hero" | "creep" | "neutral" | "roshan" | "tower" | "ancient" | "rax"
 
@@ -66,7 +66,7 @@ interface Status {
   shield: number
   shieldT: number
   dots: { dps: number; t: number; src: Body }[]
-  hots: { hps: number; t: number }[]
+  hots: { hps: number; t: number; src: Body }[]
   buffs: { stat: "attack" | "speed" | "armor" | "attackSpeed"; pct: number; t: number }[]
   lifesteal: number
   lifestealT: number
@@ -297,6 +297,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   let roshanTimer = 0
 
   const bodies: Body[] = []
+  /** Ability usage counters (balance reports / tests). */
+  const casts = new Map<string, number>()
   const add = (b: Omit<Body, "st" | "alive" | "cooldown"> & Partial<Pick<Body, "cooldown">>) => {
     const full: Body = { cooldown: 0, alive: true, st: emptyStatus(), ...b }
     bodies.push(full)
@@ -427,10 +429,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const sum = (k: "hp" | "damage" | "armor" | "attackSpeed" | "speed" | "lifesteal") =>
       items.reduce((s, it) => s + (it[k] ?? 0), 0)
     const ratio = b.hp / b.maxHp
-    b.maxHp = h.def.hp + h.def.hpPerLevel * lv + sum("hp")
+    // Melee heroes trade range for staying power and hit harder up close.
+    const melee = h.def.attack === "melee"
+    b.maxHp = (h.def.hp + h.def.hpPerLevel * lv + sum("hp")) * (melee ? 1.08 : 1)
     b.hp = Math.max(1, ratio * b.maxHp)
-    b.damage = (h.def.damage + h.def.damagePerLevel * lv + sum("damage")) * skillMul(h)
-    b.armor = h.def.armor + lv * 0.4 + sum("armor")
+    b.damage =
+      (h.def.damage + h.def.damagePerLevel * lv + sum("damage")) * skillMul(h) * (melee ? 1.08 : 1)
+    b.armor = h.def.armor + lv * 0.4 + sum("armor") + (melee ? 1 : 0)
     b.attackTime = h.def.attackTime / (1 + sum("attackSpeed") + lv * 0.02)
     b.speed = h.def.speed + sum("speed")
   }
@@ -766,7 +771,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         break
       }
       case "hot":
-        t.st.hots.push({ hps: e.hps * power, t: e.duration })
+        t.st.hots.push({ hps: e.hps * power, t: e.duration, src: caster })
         break
       case "stun":
         if (t.structure) break
@@ -830,18 +835,27 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         break
       }
       case "enemy-aoe": {
+        // Centre on the spot that catches the most heroes (creeps break ties).
         let best: Body[] = []
+        let bestScore = -1
         let center: Body | null = null
         for (const c of pickFoes) {
           if (dist(b, c) > tg.range) continue
           const group = foes.filter((f) => dist(f, c) <= tg.radius)
-          if (group.length > best.length) {
+          const score = group.filter((x) => x.type === "hero").length * 10 + group.length
+          if (score > bestScore) {
             best = group
+            bestScore = score
             center = c
           }
         }
         const heroCount = best.filter((x) => x.type === "hero").length
-        if (center && (heroCount >= minT || (isUlt ? false : best.length >= 2))) {
+        // A lone-hero ult is still worth it on a low target or in a real fight.
+        const finisher =
+          isUlt &&
+          heroCount >= 1 &&
+          (best.some((x) => x.type === "hero" && x.hp / x.maxHp < 0.45) || heroFoes.length >= 3)
+        if (center && (heroCount >= minT || finisher || (isUlt ? false : best.length >= 2))) {
           targets = best
           at = center
           radius = tg.radius
@@ -851,7 +865,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       case "self-aoe": {
         const group = foes.filter((f) => dist(f, b) <= tg.radius)
         const heroCount = group.filter((x) => x.type === "hero").length
-        if (heroCount >= minT || (!isUlt && group.length >= 3)) {
+        const finisher =
+          isUlt && heroCount >= 1 && group.some((x) => x.type === "hero" && x.hp / x.maxHp < 0.45)
+        if (heroCount >= minT || finisher || (!isUlt && group.length >= 3)) {
           targets = group
           radius = tg.radius
         }
@@ -925,6 +941,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     else fx({ t: clock, kind: "aoe", at: { x: b.x, z: b.z }, radius: 1.4, team: b.team, style })
     if (isUlt) h.ultCd = ability.cooldown
     else h.skillCd = ability.cooldown
+    casts.set(
+      `${h.def.id}:${isUlt ? "ult" : "skill"}`,
+      (casts.get(`${h.def.id}:${isUlt ? "ult" : "skill"}`) ?? 0) + 1,
+    )
     b.cooldown = Math.max(b.cooldown, 0.4)
     return true
   }
@@ -937,7 +957,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (b.st.stun > 0 || b.st.root > 0) return
     const d = dist(b, goal)
     if (d <= stopAt) return
-    const spd = b.speed * statMul(b, "speed") * (1 - (b.st.slowT > 0 ? b.st.slow : 0))
+    const chasing =
+      b.hero?.def.attack === "melee" && b.target?.type === "hero" && b.hero.intent === "fight"
+    const spd =
+      b.speed * statMul(b, "speed") * (1 - (b.st.slowT > 0 ? b.st.slow : 0)) * (chasing ? 1.12 : 1)
     const step = Math.min(d - stopAt, spd * dt)
     const nx = b.x + ((goal.x - b.x) / d) * step
     const nz = b.z + ((goal.z - b.z) / d) * step
@@ -1215,7 +1238,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
     s.dots = s.dots.filter((d) => d.t > 0)
     for (const hh of s.hots) {
-      heal(b, b, hh.hps * dt)
+      heal(hh.src, b, hh.hps * dt)
       hh.t -= dt
     }
     s.hots = s.hots.filter((x) => x.t > 0)
@@ -1574,6 +1597,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       paused = p
     },
     snapshot,
+    castCounts: (): ReadonlyMap<string, number> => casts,
     /** Run to completion headlessly (tests, balance reports). */
     runToEnd: (limitSeconds = maxTime + 1) => {
       for (let guard = 0; guard < (limitSeconds / TICK) * 2; guard++) {

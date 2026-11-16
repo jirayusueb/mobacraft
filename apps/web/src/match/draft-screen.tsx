@@ -46,6 +46,8 @@ export const DraftScreen = ({
   const [state, setState] = useState(draft)
   const [hovered, setHovered] = useState<string | null>(null)
   const [role, setRole] = useState<Role | "all">("all")
+  /** The hero most recently banned or picked — its slot plays a short lock-in flash. */
+  const [locked, setLocked] = useState<string | null>(null)
   const action = currentAction(state)
   const yourTurn = action?.side === you
   const taken = unavailable(state)
@@ -57,8 +59,12 @@ export const DraftScreen = ({
   useEffect(() => {
     if (!action || action.side === you) return
     const id = setTimeout(() => {
-      const r = applyDraft(state, aiChoose(state))
-      if (r.ok) setState(r.state)
+      const heroId = aiChoose(state)
+      const r = applyDraft(state, heroId)
+      if (r.ok) {
+        setState(r.state)
+        setLocked(heroId)
+      }
     }, 900)
     return () => clearTimeout(id)
   }, [state, action, you])
@@ -68,6 +74,7 @@ export const DraftScreen = ({
     const r = applyDraft(state, heroId)
     if (r.ok) {
       setState(r.state)
+      setLocked(heroId)
       setHovered(null)
     }
   }
@@ -82,6 +89,13 @@ export const DraftScreen = ({
       ? assignPlayer(state, you, preview.id)
       : undefined
   const done = isComplete(state)
+  const yourTags = new Set(
+    state.picks[you].flatMap((p) => {
+      const h = HEROES.find((x) => x.id === p.heroId)
+      return h ? effectSummary(h) : []
+    }),
+  )
+  const adds = preview ? effectSummary(preview).filter((t) => !yourTags.has(t)) : []
   const stepLabel = action
     ? `${action.side === you ? "Your" : `${theirTeam.tag}'s`} ${action.kind === "ban" ? "ban" : "pick"}`
     : "Draft complete"
@@ -120,7 +134,7 @@ export const DraftScreen = ({
       </Panel>
 
       <div className="mx-auto mt-3 grid min-h-0 w-full max-w-6xl flex-1 grid-cols-[220px_1fr_220px] gap-3 max-lg:grid-cols-[180px_1fr_180px] max-md:grid-cols-1">
-        <SideColumn side={you} state={state} title={yourTeam.name} you />
+        <SideColumn side={you} state={state} title={yourTeam.name} locked={locked} you />
 
         {/* centre: pool */}
         <Panel className="flex min-h-0 flex-col p-3">
@@ -222,6 +236,18 @@ export const DraftScreen = ({
                     <span className="font-medium text-amber-200">{preview.ultimate.name}</span>{" "}
                     (ult)
                   </p>
+                  {state.picks[you].length > 0 && !taken.has(preview.id) ? (
+                    <p className="mt-1 text-[11px] text-white/55">
+                      {adds.length > 0 ? (
+                        <>
+                          Adds to your lineup:{" "}
+                          <span className="font-medium text-radiant">{adds.join(", ")}</span>
+                        </>
+                      ) : (
+                        "Doubles up on what your lineup already has."
+                      )}
+                    </p>
+                  ) : null}
                 </div>
                 {previewPlayer ? (
                   <div className="shrink-0 text-right text-[11px] text-white/55">
@@ -240,7 +266,7 @@ export const DraftScreen = ({
           </div>
         </Panel>
 
-        <SideColumn side={them} state={state} title={theirTeam.name} />
+        <SideColumn side={them} state={state} title={theirTeam.name} locked={locked} />
       </div>
 
       <div className="mx-auto mt-3 flex w-full max-w-6xl justify-end">
@@ -264,11 +290,13 @@ const SideColumn = ({
   side,
   state,
   title,
+  locked,
   you,
 }: {
   side: DraftSide
   state: DraftState
   title: string
+  locked: string | null
   you?: boolean
 }) => {
   const team = side === "blue" ? state.blue : state.red
@@ -292,7 +320,10 @@ const SideColumn = ({
             className="relative grid size-9 place-items-center rounded-lg border border-dashed border-white/15 bg-black/20"
           >
             {bans[i] ? (
-              <HeroGem heroId={bans[i].heroId} size={34} dim />
+              <>
+                <HeroGem heroId={bans[i].heroId} size={34} dim />
+                {bans[i].heroId === locked ? <LockFlash key={locked} ban /> : null}
+              </>
             ) : (
               <Ban className="size-3.5 text-white/25" aria-hidden />
             )}
@@ -306,10 +337,21 @@ const SideColumn = ({
           return (
             <li
               key={p.id}
-              className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-black/20 p-1.5"
+              className="relative flex items-center gap-2 overflow-hidden rounded-xl border border-white/[0.06] bg-black/20 p-1.5"
             >
+              {pick && pick.heroId === locked ? (
+                <LockFlash key={locked} side={side} you={you} />
+              ) : null}
               {pick ? (
-                <HeroGem heroId={pick.heroId} size={34} />
+                <HeroGem
+                  key={pick.heroId}
+                  heroId={pick.heroId}
+                  size={34}
+                  className={cn(
+                    pick.heroId === locked &&
+                      "animate-in duration-500 ease-out zoom-in-50 fade-in motion-reduce:animate-none",
+                  )}
+                />
               ) : (
                 <span className="grid size-[34px] place-items-center rounded-xl bg-white/[0.04]">
                   <Icon className="size-3.5 text-white/35" aria-hidden />
@@ -336,3 +378,22 @@ const SideColumn = ({
     </Panel>
   )
 }
+
+/**
+ * Lock-in flash: a team-tinted sweep that fades out once. Mounted (keyed) when a
+ * slot receives the hero just chosen; reduced motion shows a static outline instead.
+ */
+const LockFlash = ({ ban, you }: { ban?: boolean; side?: DraftSide; you?: boolean }) => (
+  <span
+    className={cn(
+      "pointer-events-none absolute inset-0 rounded-[inherit] ring-2 ring-inset",
+      "animate-out fade-out fill-mode-forwards delay-500 duration-1000 motion-reduce:animate-none motion-reduce:opacity-60",
+      ban
+        ? "bg-white/10 ring-white/50"
+        : you
+          ? "bg-[linear-gradient(90deg,rgba(95,224,122,0.35),transparent)] ring-radiant/70"
+          : "bg-[linear-gradient(90deg,rgba(255,106,77,0.35),transparent)] ring-dire/70",
+    )}
+    aria-hidden
+  />
+)

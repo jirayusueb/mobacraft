@@ -798,7 +798,75 @@ export const HEROES = [
 ] as const satisfies readonly HeroDef[]
 
 export type HeroId = (typeof HEROES)[number]["id"]
-export const HERO_BY_ID: ReadonlyMap<string, HeroDef> = new Map(HEROES.map((h) => [h.id, h]))
+
+/**
+ * Balance patch — applied on top of the base roster. Keep every tuning change here
+ * (with the evidence that motivated it) so base kits stay readable and patches diff cleanly.
+ * Evidence: /tmp-style headless reports (32 AI games, comps swapped across sides).
+ */
+interface Patch {
+  readonly hp?: number
+  readonly hpPerLevel?: number
+  readonly damage?: number
+  readonly armor?: number
+  /** Multiply every damage/heal amount in the ability. */
+  readonly skillScale?: number
+  readonly ultScale?: number
+  readonly skillCooldown?: number
+  readonly ultCooldown?: number
+}
+const PATCH: Readonly<Record<string, Patch>> = {
+  // 18–25% win rate: hook too slow and too weak to start fights.
+  chainwarden: {
+    hp: 720,
+    hpPerLevel: 98,
+    damage: 48,
+    armor: 6,
+    skillScale: 1.35,
+    skillCooldown: 9,
+  },
+  // 13–16% win rate: ult needed 3 heroes and did little damage.
+  voidmother: { skillScale: 1.3, skillCooldown: 8, ultScale: 1.4, ultCooldown: 55 },
+  // 72–80% win rate: heal uptime too high.
+  lumenmaid: { skillScale: 0.85, skillCooldown: 8 },
+  // 75–82% win rate: AoE skill + 300 ult outclassed other mids.
+  embercall: { skillScale: 0.85, ultScale: 0.85 },
+}
+
+const scaleAbility = (a: Ability, k: number, cd?: number): Ability => ({
+  ...a,
+  ...(cd ? { cooldown: cd } : {}),
+  ...(a.name === "Event Horizon" ? { minTargets: 2 } : {}),
+  effects: a.effects.map((e) =>
+    e.type === "damage" || e.type === "heal"
+      ? { ...e, amount: e.amount * k, ...(e.scale ? { scale: e.scale * k } : {}) }
+      : e.type === "dot"
+        ? { ...e, dps: e.dps * k }
+        : e.type === "hot"
+          ? { ...e, hps: e.hps * k }
+          : e.type === "shield"
+            ? { ...e, amount: e.amount * k }
+            : e,
+  ),
+})
+
+const patched = (h: HeroDef): HeroDef => {
+  const p = PATCH[h.id]
+  if (!p) return h
+  return {
+    ...h,
+    ...(p.hp ? { hp: p.hp } : {}),
+    ...(p.hpPerLevel ? { hpPerLevel: p.hpPerLevel } : {}),
+    ...(p.damage ? { damage: p.damage } : {}),
+    ...(p.armor ? { armor: p.armor } : {}),
+    skill: scaleAbility(h.skill, p.skillScale ?? 1, p.skillCooldown),
+    ultimate: scaleAbility(h.ultimate, p.ultScale ?? 1, p.ultCooldown),
+  }
+}
+
+export const HERO_BY_ID: ReadonlyMap<string, HeroDef> = new Map(
+  HEROES.map((h) => [h.id, patched(h)]),
+)
 export const heroDef = (id: string): HeroDef => {
   const h = HERO_BY_ID.get(id)
   if (!h) throw new Error(`Unknown hero ${id}`)

@@ -42,6 +42,7 @@ export const MatchDay = ({
           draft={screen.draft}
           you={screen.you}
           final={screen.final}
+          history={screen.history}
           dispatch={dispatch}
         />
       )

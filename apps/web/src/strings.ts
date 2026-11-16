@@ -141,6 +141,33 @@ export const KIND_TYPE: Record<string, string> = {
 
 export const LANE_LABEL: Record<string, string> = { top: "Top", mid: "Mid", bot: "Bot" }
 
+/** Match Day: what a hero's AI is currently doing (HeroLine.intent). */
+export const INTENT_LABEL: Record<string, string> = {
+  lane: "Lane",
+  jungle: "Jungle",
+  fight: "Fight",
+  push: "Push",
+  retreat: "Retreat",
+  roshan: "Roshan",
+  group: "Group",
+  dead: "Dead",
+}
+
+/** Match Day announcer banner titles, keyed by banner kind / streak. */
+export const ANNOUNCER: Record<string, string> = {
+  "first-blood": "First Blood",
+  double: "Double Kill",
+  triple: "Triple Kill",
+  ultra: "Ultra Kill",
+  rampage: "Rampage",
+  tower: "Tower Destroyed",
+  rax: "Barracks Destroyed",
+  roshan: "Roshan Slain",
+  aegis: "Reincarnated",
+  wipe: "Team Wipe",
+  ancient: "Ancient Under Attack",
+}
+
 /** Help popover rows: keys (each rendered as a key cap) → action. */
 export const CONTROLS: readonly { readonly keys: readonly string[]; readonly action: string }[] = [
   { keys: ["Drag"], action: "Pan the map" },
