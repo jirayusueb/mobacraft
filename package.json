@@ -14,7 +14,7 @@
     "lint": "oxlint",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "prepare": "lefthook install"
+    "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && lefthook install || true"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.4",
