@@ -330,7 +330,7 @@ const SideColumn = ({
             {bans[i] ? (
               <>
                 <HeroGem heroId={bans[i].heroId} size={34} dim />
-                {bans[i].heroId === locked ? <LockFlash key={locked} ban /> : null}
+                {bans[i].heroId === locked ? <LockFlash key={`flash-${locked}`} ban /> : null}
               </>
             ) : (
               <Ban className="size-3.5 text-white/25" aria-hidden />
@@ -348,7 +348,7 @@ const SideColumn = ({
               className="relative flex items-center gap-2 overflow-hidden rounded-xl border border-white/[0.06] bg-black/20 p-1.5"
             >
               {pick && pick.heroId === locked ? (
-                <LockFlash key={locked} side={side} you={you} />
+                <LockFlash key={`flash-${locked}`} side={side} you={you} />
               ) : null}
               {pick ? (
                 <HeroGem

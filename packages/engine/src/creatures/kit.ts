@@ -1,28 +1,37 @@
 /**
- * Creature model kit — the one place that maps a CreatureKind to geometry and material.
- * Geometry comes from kit-lane.ts / kit-neutral.ts (contract.ts describes the attribute layout).
+ * Creature model kit — the one place that maps a CreatureKind to skeleton, geometry and
+ * material. Geometry comes from kit-lane.ts / kit-neutral.ts / kit-hero.ts (contract.ts
+ * describes the attribute layout).
+ *
+ * Each model gets a full Skeleton (see skeleton.ts): root → pelvis → spine → chest →
+ * head, plus leg / arm chains, wings, tail, cape, siege wheels and the throwing lever.
+ * The CPU PoseSolver writes one 3×4 skinning matrix per bone into a per-kind float
+ * texture (one row per instance, three texels per bone); the material skins every
+ * vertex with two influences through `textureLoad`, so the whole animation stays
+ * instanced — no per-unit meshes, no CPU vertex work.
  */
 import type { CreatureKind, UnitKind } from "@mobacraft/sim"
 import {
   Box3,
+  DataTexture,
+  FloatType,
+  NearestFilter,
+  RGBAFormat,
   type BufferGeometry,
-  Float32BufferAttribute,
   MeshStandardNodeMaterial,
   type Node,
 } from "three/webgpu"
 import {
   attribute,
   color,
-  cos,
   float,
-  max,
+  instanceIndex,
+  ivec2,
   mix,
   positionGeometry,
   positionLocal,
   referenceAttribute,
-  sin,
-  smoothstep,
-  time,
+  textureLoad,
   vec3,
   vec4,
 } from "three/tsl"
@@ -32,7 +41,7 @@ import { ANIM, type CreatureModel } from "./contract.ts"
 import { heroModel } from "./kit-hero.ts"
 import { laneModels } from "./kit-lane.ts"
 import { neutralModels } from "./kit-neutral.ts"
-import { hipHeight } from "./rig.ts"
+import { type AttackStyle, PoseSolver, type Skeleton } from "./skeleton.ts"
 
 /** The InstancedMesh's per-instance matrix, as three binds it for instanced draws. */
 // Typings model ReferenceAttributeNode as a bare node; at runtime it is a mat4 node.
@@ -43,38 +52,15 @@ const builders: Record<CreatureKind, () => BufferGeometry> = {
   ...neutralModels,
 }
 
-const models = new Map<UnitKind, CreatureModel>()
-
-/**
- * WebGPU allows 8 vertex buffers per pipeline (position, normal, color, the instance
- * matrix and instanced `anim` already take 5), so the kit's scalar attributes are
- * packed into two vec4s:
- *   rig  = (pivot.xyz, bone)
- *   partInfo = (limb, glow, model height, hip height)
- */
-const packRig = (g: BufferGeometry, height: number): void => {
-  // Kit caches (heroModel) can hand back an already packed geometry (e.g. after HMR).
-  if (g.hasAttribute("rig")) return
-  const hip = hipHeight(g)
-  const pivot = g.getAttribute("pivot")
-  const bone = g.getAttribute("bone")
-  const limb = g.getAttribute("limb")
-  const glow = g.getAttribute("glow")
-  const n = pivot.count
-  const rig = new Float32Array(n * 4)
-  const info = new Float32Array(n * 4)
-  for (let i = 0; i < n; i++) {
-    rig.set([pivot.getX(i), pivot.getY(i), pivot.getZ(i), bone.getX(i)], i * 4)
-    info.set([limb.getX(i), glow.getX(i), height, hip], i * 4)
-  }
-  for (const name of ["pivot", "bone", "limb", "glow"]) g.deleteAttribute(name)
-  g.setAttribute("rig", new Float32BufferAttribute(rig, 4))
-  g.setAttribute("partInfo", new Float32BufferAttribute(info, 4))
-}
+/** Attack clip family per kind. */
+const styleOf = (kind: UnitKind, skeleton: Skeleton): AttackStyle =>
+  kind.endsWith("-siege") ? "siege" : skeleton.arms.length === 0 ? "bite" : "swing"
 
 /** Ground distance per full gait cycle. Siege wheels (r = 0.2) roll without slipping. */
 const strideOf = (kind: UnitKind, height: number): number =>
   kind.endsWith("-siege") ? 2 * Math.PI * 0.2 : Math.max(0.55, height * 1.15)
+
+const models = new Map<UnitKind, CreatureModel>()
 
 /** Geometry for any unit kind: creatures from the creep/neutral kits, heroes from the hero kit. */
 export const creatureModel = (kind: UnitKind): CreatureModel => {
@@ -84,145 +70,169 @@ export const creatureModel = (kind: UnitKind): CreatureModel => {
     geometry.computeBoundingBox()
     const box = geometry.boundingBox ?? new Box3()
     const height = box.max.y - box.min.y
-    packRig(geometry, height)
     m = {
       kind,
       geometry,
       height,
       radius: Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 2,
       stride: strideOf(kind, height),
+      skeleton: geometry.userData.skeleton as Skeleton,
+      solver: new PoseSolver(geometry.userData.skeleton as Skeleton),
+      style: styleOf(kind, geometry.userData.skeleton as Skeleton),
     }
     models.set(kind, m)
   }
   return m
 }
 
-let material: MeshStandardNodeMaterial | undefined
+// ── skin data texture ───────────────────────────────────────────────────────────
+// One texture per kind (material binds its own): row = instance slot, three texels
+// per bone along x, RGBA32F. Renderers write solver output rows and flag update ranges.
 
-/** 1 where `v` equals the integer code `k`, else 0. */
-const is = (v: Node<"float">, k: number) => float(1).sub(v.sub(k).abs().min(1))
+export interface SkinTarget {
+  readonly texture: DataTexture
+  /** Scratch the solver writes into (bone-major, FLOATS_PER_BONE per bone). */
+  readonly scratch: Float32Array
+  readonly solver: PoseSolver
+  readonly skeleton: Skeleton
+  readonly style: AttackStyle
+  readonly stride: number
+  readonly bones: number
+}
+
+/** texels per bone along x (3 rows of a 3×4 matrix). */
+export const TEXELS_PER_BONE = 3
+
+export const createSkin = (kind: UnitKind, capacity: number): SkinTarget => {
+  const model = creatureModel(kind)
+  const bones = model.skeleton.count
+  const width = bones * TEXELS_PER_BONE
+  const texture = new DataTexture(
+    new Float32Array(width * capacity * 4),
+    width,
+    capacity,
+    RGBAFormat,
+    FloatType,
+  )
+  texture.magFilter = NearestFilter
+  texture.minFilter = NearestFilter
+  texture.needsUpdate = true
+  return {
+    texture,
+    scratch: new Float32Array(bones * 12),
+    solver: model.solver,
+    skeleton: model.skeleton,
+    style: model.style,
+    stride: model.stride,
+    bones,
+  }
+}
+
+/** Copy a solved pose (bone-major) into row `row` of the texture and mark the range. */
+export const writeSkin = (t: SkinTarget, row: number): void => {
+  const data = t.texture.image.data as Float32Array
+  const base = row * t.texture.image.width * 4
+  const b = t.scratch
+  for (let i = 0; i < t.bones; i++) {
+    data.set(b.subarray(i * 12, i * 12 + 12), base + i * TEXELS_PER_BONE * 4)
+  }
+  t.texture.clearUpdateRanges()
+  t.texture.addUpdateRange(base, t.bones * TEXELS_PER_BONE * 4)
+  t.texture.needsUpdate = true
+}
+
+/** Bind pose into row `row` (units not yet solved draw un-skinned). */
+export const bindSkin = (t: SkinTarget, row: number): void => {
+  t.solver.bind(t.scratch)
+  writeSkin(t, row)
+}
+
+let materialCache: Map<UnitKind, MeshStandardNodeMaterial> | undefined
 
 /**
- * The one shared creature material. Animation is pure TSL over two inputs:
- *
- *  - baked per vertex (rig.ts): `pivot` + `bone` — every limb part rotates rigidly about
- *    its own joint (hip, shoulder, wing root, wheel hub, siege lever), so limbs stay
- *    attached instead of shearing; `limb` (±1) picks the antiphase group;
- *  - per instance (render.ts writes it each frame): `anim` = (stride phase, move 0..1,
- *    attack progress 0..1 (≥ 1 = none), seed). Phase advances with distance travelled,
- *    so feet match ground speed at any game speed, and units at rest stop walking.
- *
- *  Legs swing about the hip with a knee lift on the forward pass; the body drops by
- *  exactly the leg's vertical shortening so planted feet stay on the ground. Arms
- *  counter-swing; on attack the weapon arm (−1) winds up overhead and strikes, the body
- *  lunges, quadrupeds rear their front legs, siege levers throw. Wings flap, wheels roll.
- *  Glow parts are emissive, brighter at night (feeds the selective bloom).
+ * The creature material, one per kind (each binds its own skin texture; the shader is
+ * identical so pipelines stay cached). Skinning: two influences per vertex —
+ * `bind = (boneA, boneB, weightA, 0)` per vertex, `anim` per instance picks the texture
+ * row via `instanceIndex`. Limbs, spine, head, tail, cape and wheels all follow the
+ * solved pose; flat-shaded normals are transformed by bone A.
  */
-export const creatureMaterial = (): MeshStandardNodeMaterial => {
-  if (material) return material
-  const m = new MeshStandardNodeMaterial({
+export const creatureMaterial = (kind: UnitKind, skin: SkinTarget): MeshStandardNodeMaterial => {
+  materialCache ??= new Map()
+  let m = materialCache.get(kind)
+  if (m) return m
+  m = new MeshStandardNodeMaterial({
     vertexColors: true,
     roughness: 0.78,
     metalness: 0.05,
     flatShading: true,
   })
   const p = positionGeometry
-  const rig = attribute<"vec4">("rig", "vec4")
   const info = attribute<"vec4">("partInfo", "vec4")
-  const pivot = rig.xyz
-  const bone = rig.w
-  const limb = info.x
+  const bind = attribute<"vec4">("bind", "vec4")
   const glow = info.y
-  const size = info.z
-  const hip = info.w
-  const legged = hip.mul(100).clamp(0, 1)
   const anim = attribute<"vec4">(ANIM, "vec4")
-  const phase = anim.x
-  const move = anim.y
-  const atk = anim.z
-  const seed = anim.w
+  void anim // row selection uses instanceIndex directly; anim drives the solver on CPU
 
-  const leg = is(bone, 1)
-  const arm = is(bone, 2)
-  const wing = is(bone, 3)
-  const wheel = is(bone, 4)
-  const lever = is(bone, 5)
+  const instanceRow = instanceIndex.toInt()
+  const tA0 = textureLoad(skin.texture, ivec2(bind.x.toInt().mul(TEXELS_PER_BONE), instanceRow))
+  const tA1 = textureLoad(
+    skin.texture,
+    ivec2(bind.x.toInt().mul(TEXELS_PER_BONE).add(1), instanceRow),
+  )
+  const tA2 = textureLoad(
+    skin.texture,
+    ivec2(bind.x.toInt().mul(TEXELS_PER_BONE).add(2), instanceRow),
+  )
+  const tB0 = textureLoad(skin.texture, ivec2(bind.y.toInt().mul(TEXELS_PER_BONE), instanceRow))
+  const tB1 = textureLoad(
+    skin.texture,
+    ivec2(bind.y.toInt().mul(TEXELS_PER_BONE).add(1), instanceRow),
+  )
+  const tB2 = textureLoad(
+    skin.texture,
+    ivec2(bind.y.toInt().mul(TEXELS_PER_BONE).add(2), instanceRow),
+  )
 
-  // Attack envelope: wind-up → strike → recover; all zero once atk ≥ 1.
-  const live = float(1).sub(smoothstep(0.98, 1, atk))
-  const wind = smoothstep(0, 0.32, atk).mul(live)
-  const strike = smoothstep(0.32, 0.5, atk).mul(live)
-  const rec = smoothstep(0.5, 1, atk).mul(live)
-  const busy = wind.sub(rec).clamp(0, 1)
-
-  // Gait.
-  const LEG_AMP = 0.5
-  const legSwing = sin(phase).mul(LEG_AMP).mul(move)
-  const breath = sin(time.mul(1.4).add(seed))
-  const front = smoothstep(0.03, 0.1, pivot.z) // quadruped forelegs (bipeds sit at z ≈ 0)
-  const rear = front.mul(busy).mul(-0.9)
-  const legA = limb
-    .mul(legSwing)
-    .mul(float(1).sub(front.mul(busy)))
-    .add(rear)
-  // Arms: counter-swing with the legs (shared groups pair opposite arm + leg), idle sway.
-  const walkArm = limb.mul(legSwing).mul(0.8).add(breath.mul(limb).mul(0.04))
-  const weapon = limb.negate().clamp(0, 1) // right-hand group (−1) carries the weapon
-  const swingAtk = wind.mul(-2.1).add(strike.mul(2.5)).sub(rec.mul(0.4))
-  const offAtk = busy.mul(-0.45)
-  const armA = mix(walkArm, mix(offAtk, swingAtk, weapon), busy.max(strike.sub(rec)))
-  const leverA = strike.sub(rec).mul(1.9)
-  const angX = leg.mul(legA).add(arm.mul(armA)).add(wheel.mul(phase)).add(lever.mul(leverA))
-  // Wings: slow beat at rest, faster aloft-looking beat when moving, big beat on attack.
-  const beat = sin(time.mul(mix(2.6, 7, move)).add(seed))
-  const angZ = wing.mul(limb).mul(beat.mul(0.45).add(0.12).add(busy.mul(0.6)))
-
-  // Rotate about the pivot: x-axis (pitch) then z-axis (roll); body parts have angle 0.
-  const rel = p.sub(pivot)
-  const cx = cos(angX)
-  const sx = sin(angX)
-  const ry = rel.y.mul(cx).sub(rel.z.mul(sx))
-  const rz = rel.y.mul(sx).add(rel.z.mul(cx))
-  const cz = cos(angZ)
-  const sz = sin(angZ)
-  const rx = rel.x.mul(cz).sub(ry.mul(sz))
-  const ry2 = rel.x.mul(sz).add(ry.mul(cz))
-  // Knee lift on the forward pass (foot clears the ground, lands planted).
-  const lift = leg
-    .mul(max(float(0), limb.mul(cos(phase))))
-    .mul(rel.y.negate().max(0))
-    .mul(0.32)
-    .mul(move)
-  const posed = pivot.add(vec3(rx, ry2.add(lift), rz))
-
-  // Whole body: drop by the legs' shortening, lean into the walk, breathe, lunge.
-  // Legless models (siege carts, spirits) neither drop nor lean into a stride.
-  const drop = hip
-    .mul(float(1).sub(cos(legSwing)))
-    .add(sin(phase.mul(2)).abs().mul(hip).mul(0.03).mul(move))
-  const lean = move
-    .mul(0.07)
-    .mul(legged)
-    .add(strike.sub(rec).mul(0.22))
-    .sub(wind.mul(float(1).sub(strike)).mul(0.08))
-  const lunge = strike.sub(rec).mul(size).mul(0.12)
-  const chest = smoothstep(0.35, 0.8, p.y.div(size))
-  const breathe = breath.mul(0.012).mul(p.y).mul(chest).mul(float(1).sub(move))
-  const local = vec3(
-    posed.x,
-    posed.y.sub(drop).add(breathe),
-    posed.z.add(posed.y.mul(lean)).add(lunge),
+  const px = p.x
+  const py = p.y
+  const pz = p.z
+  const pa = vec3(
+    tA0.x.mul(px).add(tA0.y.mul(py)).add(tA0.z.mul(pz)).add(tA0.w),
+    tA1.x.mul(px).add(tA1.y.mul(py)).add(tA1.z.mul(pz)).add(tA1.w),
+    tA2.x.mul(px).add(tA2.y.mul(py)).add(tA2.z.mul(pz)).add(tA2.w),
+  )
+  const pb = vec3(
+    tB0.x.mul(px).add(tB0.y.mul(py)).add(tB0.z.mul(pz)).add(tB0.w),
+    tB1.x.mul(px).add(tB1.y.mul(py)).add(tB1.z.mul(pz)).add(tB1.w),
+    tB2.x.mul(px).add(tB2.y.mul(py)).add(tB2.z.mul(pz)).add(tB2.w),
+  )
+  const skinned = mix(pb, pa, bind.z)
+  // Normals follow bone A's rotation: n' = R · n with R = the rotation rows.
+  const bn = vec3(0, 0, 1) // bind normals are recomputed per face on CPU; transform a flat proxy
+  void bn
+  m.normalNode = mix(
+    vec3(
+      tB0.x.mul(p.x).add(tB1.x.mul(p.y)).add(tB2.x.mul(p.z)),
+      tB0.y.mul(p.x).add(tB1.y.mul(p.y)).add(tB2.y.mul(p.z)),
+      tB0.z.mul(p.x).add(tB1.z.mul(p.y)).add(tB2.z.mul(p.z)),
+    ),
+    vec3(
+      tA0.x.mul(p.x).add(tA1.x.mul(p.y)).add(tA2.x.mul(p.z)),
+      tA0.y.mul(p.x).add(tA1.y.mul(p.y)).add(tA2.y.mul(p.z)),
+      tA0.z.mul(p.x).add(tA1.z.mul(p.y)).add(tA2.z.mul(p.z)),
+    ),
+    bind.z,
   )
 
   // three applies the instance matrix to positionLocal *before* positionNode runs, so
   // rotate the local offset by the instance matrix (w = 0) and add it to the already
   // instanced position — keeps three's own instancing path intact.
-  const offset = instanceMatrix.mul(vec4(local.sub(p), float(0))).xyz
+  const offset = instanceMatrix.mul(vec4(skinned.sub(p), float(0))).xyz
   m.positionNode = positionLocal.add(offset)
   const base = attribute<"vec3">("color", "vec3")
   m.emissiveNode = base.mul(glow).mul(mix(float(0.9), float(2.4), nightGlow))
   // Darken toward the feet so creatures sit on the grass instead of floating.
   m.colorNode = mix(color(0x111014), base, p.y.mul(6).clamp(0.55, 1))
-  material = m
+  materialCache.set(kind, m)
   return m
 }

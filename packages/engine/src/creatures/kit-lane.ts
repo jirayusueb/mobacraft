@@ -23,8 +23,14 @@ import {
   Quaternion,
   Vector3,
 } from "three/webgpu"
-import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
-import { type BoundPart, bindJoints, type Joint, type JointKind, transformPivots } from "./rig.ts"
+import {
+  bakeModel,
+  type BoundPart,
+  type Joint,
+  type JointKind,
+  type Skeleton,
+  type SkeletonSpec,
+} from "./rig.ts"
 
 type Vec = readonly [number, number, number]
 interface Place {
@@ -51,9 +57,9 @@ class Model {
   private readonly parts: BoundPart[] = []
   private readonly joints: Joint[] = []
 
-  /** Declare a joint the limb group `limb` pivots around. */
-  joint(kind: JointKind, limb: number, at: Vec): this {
-    this.joints.push({ kind, limb, at })
+  /** Declare a joint the limb group `limb` pivots around; child/grandchild extend the chain. */
+  joint(kind: JointKind, limb: number, at: Vec, child?: Vec, grandchild?: Vec): this {
+    this.joints.push({ kind, limb, at, child, grandchild })
     return this
   }
 
@@ -87,17 +93,13 @@ class Model {
     return this.push(orient(new ConeGeometry(r, len, n), a, b), hex, opts)
   }
 
-  build(scale = 1): BufferGeometry {
-    bindJoints(this.parts, this.joints)
-    const merged = mergeGeometries(
-      this.parts.map((p) => p.geo),
-      false,
-    )
-    if (!merged) throw new Error("kit-lane: merge failed")
-    for (const p of this.parts) p.geo.dispose()
+  build(scale = 1, spec: SkeletonSpec = {}): BufferGeometry {
+    const merged = bakeModel(this.parts, this.joints, spec)
     if (scale !== 1) {
       merged.scale(scale, scale, scale)
-      transformPivots(merged, scale)
+      // Keep bone rest positions in step with the uniform scale.
+      const rest = (merged.userData.skeleton as Skeleton).rest
+      for (let i = 0; i < rest.length; i++) rest[i]! *= scale
     }
     merged.computeVertexNormals()
     merged.computeBoundingBox()
@@ -220,6 +222,7 @@ const melee = (t: Team, dire: boolean): BufferGeometry => {
     m.add(new OctahedronGeometry(0.055), t.trim, { at: [0, 0.46, 0.14], scale: [1, 1.3, 0.7] })
   }
 
+  m.joint("head", 0, [0, 0.72, 0.02])
   // Cape (tattered bottom edge)
   m.add(new BoxGeometry(0.3, 0.3, 0.04), dire ? t.clothDark : t.cloth, {
     at: [0, 0.37, -0.135],
@@ -374,6 +377,7 @@ const ranged = (t: Team, dire: boolean): BufferGeometry => {
     if (dire) m.spike([s * 0.19, 0.57, -0.01], [s * 0.26, 0.66, -0.04], 0.035, t.trim)
   }
 
+  m.joint("head", 0, [0, 0.7, 0.0])
   // Hood + shadowed face + eyes
   m.add(new ConeGeometry(0.155, 0.25, 5), t.cloth, { at: [0, 0.64, -0.02], rot: [-0.25, 0, 0] })
   m.add(new OctahedronGeometry(0.085), t.visor, { at: [0, 0.6, 0.065], scale: [1, 1, 0.9] })
@@ -588,6 +592,7 @@ const roshan = (): BufferGeometry => {
   ]
   for (const [a, b, r] of spines) m.spike(a, b, r, BONE)
 
+  m.joint("head", 0, [0, 1.55, 0.3])
   // Head — low and forward
   m.add(new DodecahedronGeometry(0.42), HIDE, { at: [0, 2.3, 0.92], scale: [1.15, 0.9, 1.15] })
   m.add(new BoxGeometry(0.5, 0.28, 0.42), DARK, { at: [0, 2.16, 1.3] })
@@ -622,6 +627,7 @@ const roshan = (): BufferGeometry => {
       m.spike([s * 1.15 + dx, 0.3, 0.8], [s * 1.15 + dx, 0.1, 0.98], 0.065, BONE, { limb })
   }
 
+  m.joint("tail", 0, [0, 1.2, -0.6], [0, 0.95, -1.15], [0, 0.5, -1.9])
   // Tail — tapering chain ending in a bone club
   m.seg([0, 1.2, -0.6], [0, 0.95, -1.15], 0.22, 0.17, 5, HIDE)
   m.seg([0, 0.95, -1.15], [0, 0.6, -1.6], 0.17, 0.12, 5, DARK)
@@ -629,7 +635,7 @@ const roshan = (): BufferGeometry => {
   m.add(new OctahedronGeometry(0.15), BONE, { at: [0, 0.4, -2.0], scale: [1, 0.8, 1.3] })
   m.spike([0, 0.5, -2.0], [0, 0.72, -2.1], 0.07, BONE)
 
-  return m.build()
+  return m.build(1, { pelvisY: 1.5 })
 }
 
 export const laneModels: Record<

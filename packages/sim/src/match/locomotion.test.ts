@@ -22,15 +22,15 @@ const run = (steps: number, dt: number, fn: (i: number) => void) => {
   for (let i = 0; i < steps; i++) fn(i)
 }
 
+const makeMoveBody = (over: Record<string, unknown> = {}) =>
+  ({ x: 10, z: 10, heading: 0, speed: 3, turnRate: TURN.mid, ...over }) as Parameters<
+    typeof moveBody
+  >[0]
+
 describe("turn rate (spec/09 test 1)", () => {
   const nav = new DynamicNav(tinyMap([0], 1))
-  const mk = (over: Record<string, unknown> = {}) =>
-    ({ x: 10, z: 10, heading: 0, speed: 3, turnRate: TURN.mid, ...over }) as Parameters<
-      typeof moveBody
-    >[0]
-
   test("180° command: no movement before the gate tick, then moves", () => {
-    const b = mk()
+    const b = makeMoveBody()
     const goal = { x: 10, z: 4 } // straight behind (heading 0 = +z)
     const gateTick = Math.ceil((Math.PI - GATE) / TURN.mid / 0.1)
     run(gateTick - 1, 0.1, () => moveBody(b, nav, goal, 0, 0.1))
@@ -40,20 +40,20 @@ describe("turn rate (spec/09 test 1)", () => {
   })
 
   test("heading never exceeds turnRate * dt per tick", () => {
-    const b = mk()
+    const b = makeMoveBody()
     const goal = { x: 10, z: 4 }
     moveBody(b, nav, goal, 0, 0.1)
     expect(Math.abs(b.heading)).toBeLessThanOrEqual(TURN.mid * 0.1 + 1e-9)
   })
 
   test("moveWithoutTurning moves on tick 1", () => {
-    const b = mk({ moveWithoutTurning: true })
+    const b = makeMoveBody({ moveWithoutTurning: true })
     moveBody(b, nav, { x: 10, z: 4 }, 0, 0.1)
     expect(b.z).toBeLessThan(10)
   })
 
   test("accelerates gradually (12 tiles/s²)", () => {
-    const b = mk({ heading: 0, moveWithoutTurning: true })
+    const b = makeMoveBody({ heading: 0, moveWithoutTurning: true })
     moveBody(b, nav, { x: 10, z: 20 }, 0, 0.1)
     expect(b.velMag!).toBeLessThan(3) // not full speed instantly
     expect(b.velMag).toBeCloseTo(ACCEL * 0.1, 9)

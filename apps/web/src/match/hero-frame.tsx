@@ -1,6 +1,6 @@
 import { MAX_LEVEL, RESPAWN_BASE, RESPAWN_PER_LEVEL } from "@mobacraft/sim"
 /** Hero frames — one compact card per hero down each side of the screen. */
-import { type HeroLine, MAX_ITEMS, itemById } from "@mobacraft/sim"
+import { type HeroLine, MAX_ITEMS, lookupItem } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
 import { Coins, Crown, Skull } from "lucide-react"
 import { INTENT_LABEL } from "../strings.ts"
@@ -20,6 +20,7 @@ const INTENT_TONE: Record<string, string> = {
   push: "bg-amber-300/20 text-amber-100",
   retreat: "bg-sky-300/15 text-sky-200",
   roshan: "bg-violet-400/20 text-violet-200",
+  save: "bg-teal-300/20 text-teal-100",
   group: "bg-emerald-300/15 text-emerald-200",
   jungle: "bg-lime-300/10 text-lime-200/85",
   gank: "bg-rose-300/15 text-rose-100",
@@ -95,7 +96,7 @@ const HeroFrame = ({
   const dead = !h.alive
   const ult = h.level >= ULT_LEVEL
   const slots = Array.from({ length: MAX_ITEMS }, (_, i) => h.items[i])
-  const inv = h.items.map((i) => itemById(i).name).join(", ")
+  const inv = h.items.map((i) => lookupItem(i).name).join(", ")
   const respawnFrac = respawnTotal > 0 ? Math.min(1, h.respawnIn / respawnTotal) : 0
   return (
     <button
@@ -168,6 +169,12 @@ const HeroFrame = ({
               h.hp < 0.3 ? "bg-amber-300" : side === "left" ? "bg-radiant" : "bg-dire",
             )}
             style={{ width: `${dead ? 0 : Math.round(h.hp * 100)}%` }}
+          />
+        </span>
+        <span className="mt-0.5 block h-1 overflow-hidden rounded-full bg-white/10" aria-hidden>
+          <span
+            className="block h-full rounded-full bg-sky-400/80 transition-[width] duration-150 motion-reduce:transition-none"
+            style={{ width: `${dead || !h.maxMana ? 0 : Math.round((h.mana / h.maxMana) * 100)}%` }}
           />
         </span>
         <span className="mt-1 flex items-center gap-[3px]" aria-hidden>

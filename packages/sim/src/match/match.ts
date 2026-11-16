@@ -21,10 +21,44 @@ import { NEUTRALS_BY_CAMP } from "../kinds.ts"
 import type { FxEvent, Population, StructureStatus, Unit } from "../population.ts"
 import type { DraftSide, DraftState } from "./draft.ts"
 import { type Ability, type Effect, type HeroDef, type Role, heroDef } from "./heroes.ts"
-import { MAX_ITEMS, itemById } from "./items.ts"
+import {
+  BACKPACK_SLOTS,
+  MAIN_SLOTS,
+  type HeroInventory,
+  addItem,
+  countItems,
+  effectiveItems,
+  emptyInventory,
+  lookupItem,
+  netWorthItems,
+  promoteFirstBackpack,
+  rollNeutralDrop,
+} from "./inventory.ts"
+import { itemById } from "./items.ts"
 import { matchupDamageMul, synergyPowerMul, teamSynergy } from "./matrix.ts"
-import { createNav } from "./nav.ts"
+import { DynamicNav, FREE_PATH_T, HULL, TURN, moveBody } from "./locomotion.ts"
+import { hasTag } from "./archetypes.ts"
 import { createRandom } from "./random.ts"
+import {
+  type MacroAction,
+  type ThinkResult,
+  blinkLanding,
+  awayFrom,
+  createBrain,
+  defensivePurchase,
+  defensiveTrigger,
+  hasDisableEffect,
+  holdDisable,
+  holdPoint,
+  initiatorEngage,
+  kiteVector,
+  BKB_DURATION,
+  BLINK_RANGE,
+  EUL_DURATION,
+  FORCE_DISTANCE,
+  LOCK_BONUS,
+  LOCK_RADIUS,
+} from "./think/index.ts"
 import {
   type Behavior,
   type LaneSlot,
@@ -141,6 +175,10 @@ interface Status {
   buffs: { stat: "attack" | "speed" | "armor" | "attackSpeed"; pct: number; t: number }[]
   lifesteal: number
   lifestealT: number
+  /** Spell immunity (BKB) seconds left. */
+  immune: number
+  /** Eul's cyclone seconds left: invulnerable, can't act. */
+  cyclone: number
 }
 
 interface Body {
@@ -181,6 +219,23 @@ interface Body {
   contributors?: Map<string, number>
   target?: Body
   hero?: HeroState
+  // --- locomotion fields (spec/11; consumers: knockback free pathing, crowd layer) ---
+  /** Hull radius in tiles (hero 0.375, creep 0.25). */
+  radius?: number
+  /** Turn rate in rad/s. */
+  turnRate?: number
+  /** Desired velocity for the avoidance pass (tiles/s). */
+  vx?: number
+  vz?: number
+  /** Free-path timer: re-path A* when it hits 0 (spec/09 locomotion). */
+  freePath?: number
+  /** Ground speed magnitude for the renderer's gait. */
+  velMag?: number
+  /** Remaining phase-movement seconds (unit collision off). */
+  phase?: number
+  /** Avoidance priority / separation mass (hero 2, others 1). */
+  priority?: number
+  mass?: number
 }
 
 interface HeroState {
@@ -200,7 +255,10 @@ interface HeroState {
   level: number
   xp: number
   gold: number
+  /** Effective items (main + neutral, unmuted) — derived from `inv` each change. */
   items: string[]
+  /** Zone inventory (spec/10 layer 1). `items` is its effective projection. */
+  inv: HeroInventory
   skillCd: number
   ultCd: number
   respawn: number
@@ -216,6 +274,22 @@ interface HeroState {
   goal: Vec2 | null
   rethink: number
   mastery: number
+  // --- Hero Think (spec/09) ---
+  mana: number
+  maxMana: number
+  manaRegen: number
+  /** Item active cooldowns by item id. */
+  itemCd: Record<string, number>
+  /** Defensive purchase already made (replaces one book item). */
+  defensiveDone: boolean
+  lastAction: MacroAction | null
+  scores: Readonly<Record<MacroAction, number>> | null
+  /** Clock of the last hero damage taken (Blink lockout). */
+  lastHeroDamage: number
+  /** Clock when this hero last had a visible enemy hero within 7 tiles. */
+  lastEnemyNear: number
+  /** Target for a save. */
+  saveId?: string
 }
 
 export type Intent =
@@ -229,6 +303,7 @@ export type Intent =
   | "gank"
   | "ward"
   | "shop"
+  | "save"
   | "dead"
 
 export interface HeroLine {
@@ -251,6 +326,9 @@ export interface HeroLine {
   readonly heroDamage: number
   readonly healing: number
   readonly items: readonly string[]
+  readonly backpack: readonly (string | null)[]
+  readonly neutral: string | null
+  readonly stash: readonly (string | null)[]
   readonly intent: Intent
   readonly aegis: boolean
   readonly netWorth: number
@@ -259,6 +337,13 @@ export interface HeroLine {
   /** Following the active call (coach or IGL); null when no call is active. */
   readonly following: boolean | null
   readonly igl: boolean
+  readonly mana: number
+  readonly maxMana: number
+  /** Hero Think: current macro action and its scores (spec/09). */
+  readonly think: {
+    readonly action: MacroAction | null
+    readonly scores: Readonly<Record<MacroAction, number>> | null
+  }
 }
 
 export interface CommsEntry {
@@ -310,6 +395,7 @@ export interface FeedEntry {
     | "phase"
     | "ward"
     | "swap"
+    | "item"
   readonly side: DraftSide | "neutral"
   readonly text: string
 }
@@ -427,6 +513,8 @@ const emptyStatus = (): Status => ({
   buffs: [],
   lifesteal: 0,
   lifestealT: 0,
+  immune: 0,
+  cyclone: 0,
 })
 
 const dist = (a: { x: number; z: number }, b: { x: number; z: number }) =>
@@ -435,12 +523,13 @@ const dist = (a: { x: number; z: number }, b: { x: number; z: number }) =>
 /** Effective multipliers from player rating and mastery. */
 const otherSide = (s: DraftSide): DraftSide => (s === "blue" ? "red" : "blue")
 const skillMul = (h: HeroState) => 0.8 + h.player.skill / 50 + h.mastery * 0.15
-const powerOf = (h: HeroState) => 1 + h.items.reduce((s, id) => s + (itemById(id).power ?? 0), 0)
+const powerOf = (h: HeroState) => 1 + h.items.reduce((s, id) => s + (lookupItem(id).power ?? 0), 0)
 const itemSum = (h: HeroState, k: "magicResist" | "armor") =>
-  h.items.reduce((s, id) => s + (itemById(id)[k] ?? 0), 0)
-const netWorthOf = (h: HeroState) =>
-  Math.round(h.gold + h.items.reduce((s, id) => s + itemById(id).cost, 0))
+  h.items.reduce((s, id) => s + (lookupItem(id)[k] ?? 0), 0)
+const netWorthOf = (h: HeroState) => Math.round(h.gold + netWorthItems(h.inv))
 const sideOf = (team: Team): DraftSide => TEAM_SIDE[team]
+/** Item active ready (spec/10 layer 4): owned in the effective set and off cooldown. */
+const ready = (h: HeroState, id: string) => h.items.includes(id) && (h.itemCd[id] ?? 0) <= 0
 const emptySources = (): Record<GoldSource, number> => ({
   passive: 0,
   creeps: 0,
@@ -457,6 +546,15 @@ const MAGIC_HEAVY = (id: string) => {
   const d = heroDef(id)
   return d.attack === "ranged" && !d.roles.includes("carry")
 }
+/** Spell projectile speed, tiles/s (spec/09). */
+export const PROJECTILE_SPEED = 12
+/** Single-target ranged (non-dash) and line abilities travel as projectiles. */
+const projectileAbility = (a: Ability) =>
+  a.target.kind === "line" ||
+  (a.target.kind === "enemy" && a.target.range > 2.5 && !a.effects.some((e) => e.type === "dash"))
+/** Mana costs (spec/09): skill 35 + 3·cd, ult 90 + 1.2·cd. */
+const manaCost = (h: HeroState, isUlt: boolean) =>
+  isUlt ? Math.round(90 + 1.2 * h.def.ultimate.cooldown) : Math.round(35 + 3 * h.def.skill.cooldown)
 const avgLevel = (xs: readonly Body[]) => xs.reduce((a, h) => a + h.hero!.level, 0) / xs.length
 
 export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptions) => {
@@ -579,10 +677,30 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   const bodies: Body[] = []
+  interface Projectile {
+    caster: Body
+    ability: Ability
+    line: boolean
+    target?: Body
+    x: number
+    z: number
+    dx: number
+    dz: number
+    left: number
+    width: number
+    hit: Set<string>
+  }
+  const projectiles: Projectile[] = []
+  const lockCasts = { total: 0, onLock: 0 }
   /** Ability usage counters (balance reports / tests). */
   const casts = new Map<string, number>()
   const add = (b: Omit<Body, "st" | "alive" | "cooldown"> & Partial<Pick<Body, "cooldown">>) => {
     const full: Body = { cooldown: 0, alive: true, st: emptyStatus(), ...b }
+    // Locomotion defaults (spec/11).
+    full.radius ??=
+      full.type === "hero" ? HULL.hero : full.type === "creep" ? HULL.creep : HULL.neutral
+    full.turnRate ??= full.type === "hero" ? TURN.fast : TURN.mid
+    full.velMag ??= 0
     bodies.push(full)
     return full
   }
@@ -688,6 +806,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           xp: 0,
           gold: 600,
           items: [],
+          inv: emptyInventory(),
           skillCd: 0,
           ultCd: 0,
           respawn: 0,
@@ -703,6 +822,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           goal: null,
           rethink: 0,
           mastery: masteryOf(player, def.id),
+          mana: 0,
+          maxMana: 0,
+          manaRegen: 0,
+          itemCd: {},
+          defensiveDone: false,
+          lastAction: null,
+          scores: null,
+          lastHeroDamage: -99,
+          lastEnemyNear: -99,
         },
       })
       heroes.push(b)
@@ -712,7 +840,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const recomputeStats = (b: Body) => {
     const h = b.hero!
     const lv = h.level - 1
-    const items = h.items.map(itemById)
+    const items = h.items.map(lookupItem)
     const sum = (k: "hp" | "damage" | "armor" | "attackSpeed" | "speed" | "lifesteal") =>
       items.reduce((s, it) => s + (it[k] ?? 0), 0)
     const ratio = b.hp / b.maxHp
@@ -725,8 +853,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     b.armor = h.def.armor + lv * 0.4 + sum("armor") + (melee ? 1 : 0)
     b.attackTime = h.def.attackTime / (1 + sum("attackSpeed") + lv * 0.02)
     b.speed = h.def.speed + sum("speed")
+    const manaRatio = h.maxMana > 0 ? h.mana / h.maxMana : 1
+    h.maxMana = 220 + 32 * lv + items.reduce((s, it) => s + (it.mana ?? 0), 0)
+    h.mana = manaRatio * h.maxMana
+    h.manaRegen = 2.5 + 0.25 * h.level + items.reduce((s, it) => s + (it.manaRegen ?? 0), 0)
   }
-  for (const h of heroes) recomputeStats(h)
+  for (const h of heroes) {
+    recomputeStats(h)
+    h.hero!.mana = h.hero!.maxMana
+  }
 
   // --- spawning --------------------------------------------------------------------
   const spawnWave = () => {
@@ -856,6 +991,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   const deal = (src: Body | undefined, target: Body, raw: number, kind: "physical" | "magic") => {
     if (!target.alive) return
+    // Eul's cyclone: invulnerable. BKB: immune to magic damage (spec/09).
+    if (target.st.cyclone > 0) return
+    if (kind === "magic" && target.st.immune > 0 && src?.type === "hero") return
+    if (src?.hero && target.hero) target.hero.lastHeroDamage = clock
     if (target.structure && !vulnerable(target)) return
     let dmg = raw * (kind === "physical" ? mitigation(target) : 0.85)
     if (kind === "magic" && target.hero)
@@ -876,7 +1015,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     credit(src, dmg, target)
     if (src && src.st.lifestealT > 0 && src.st.lifesteal > 0) heal(src, src, dmg * src.st.lifesteal)
     if (src?.hero) {
-      const ls = src.hero.items.reduce((s, id) => s + (itemById(id).lifesteal ?? 0), 0)
+      const ls = src.hero.items.reduce((s, id) => s + (lookupItem(id).lifesteal ?? 0), 0)
       if (ls > 0 && kind === "physical") heal(src, src, dmg * ls)
     }
     if (target.hp <= 0) kill(target, src)
@@ -989,7 +1128,25 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         const remaining = bodies.some(
           (b) => b.alive && b.type === "neutral" && b.home?.campId === campId,
         )
-        if (!remaining) campTimers.set(campId, CAMP_RESPAWN)
+        if (!remaining) {
+          campTimers.set(campId, CAMP_RESPAWN)
+          const kh = killer?.hero
+          if (kh) {
+            const idx = map.camps.findIndex((c) => c.id === campId)
+            const drop = rollNeutralDrop(clock / 60, Math.max(0, idx), kh.inv.neutral)
+            if (drop) {
+              kh.inv.neutral = drop
+              kh.items = effectiveItems(kh.inv, clock)
+              recomputeStats(killer!)
+              feed.push({
+                t: clock,
+                kind: "item",
+                side: kh.side,
+                text: `${kh.player.name} found ${lookupItem(drop).name} (neutral tier)`,
+              })
+            }
+          }
+        }
       }
       return
     }
@@ -1058,8 +1215,25 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const applyEffects = (caster: Body, targets: readonly Body[], ability: Ability) => {
     const h = caster.hero!
     const power = powerOf(h) * skillMul(h) * synergyMul[h.side]
+    const piercing = hasTag(h.def.id, "bkb-piercing")
     for (const t of targets) {
-      for (const e of ability.effects) applyEffect(caster, t, e, power, h.level)
+      const hostile = t.team !== caster.team
+      if (hostile && t.st.cyclone > 0) continue
+      for (const e of ability.effects) {
+        if (
+          hostile &&
+          t.st.immune > 0 &&
+          !piercing &&
+          (e.type === "stun" || e.type === "root" || e.type === "slow" || e.type === "dot")
+        )
+          continue
+        applyEffect(caster, t, e, power, h.level)
+        if (hostile && t.hero && (e.type === "stun" || e.type === "root"))
+          brain.board(h.side).noteDisable(t.id, clock + e.duration)
+      }
+      // Blackboard target lock: an initiator (or any disabler) holding a hero.
+      if (hostile && t.hero && hasDisableEffect(ability))
+        brain.board(h.side).setLock(t.id, caster.id, clock)
     }
   }
 
@@ -1120,7 +1294,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const h = b.hero!
     if (isUlt && (h.level < 6 || h.ultCd > 0)) return false
     if (!isUlt && h.skillCd > 0) return false
+    const cost = manaCost(h, isUlt)
+    if (h.mana < cost) return false
     const tg = ability.target
+    const board = brain.board(h.side)
+    const lock = board.lock(clock)
+    const disabler = hasDisableEffect(ability)
     const reach =
       "range" in tg ? tg.range + ("radius" in tg ? tg.radius : 0) : "radius" in tg ? tg.radius : 8
     const foes = [...near(b, reach + 1)].filter((o) => isEnemy(b, o) && !o.structure && seen(b, o))
@@ -1140,10 +1319,25 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
     switch (tg.kind) {
       case "enemy": {
+        const travel = (f: Body) => (projectileAbility(ability) ? dist(b, f) / PROJECTILE_SPEED : 0)
         const inRange = pickFoes
           .filter((f) => dist(b, f) <= tg.range)
           .filter((f) => !(isUlt && disc >= 70 && f.type === "hero" && f.hp / f.maxHp > 0.5))
-          .toSorted((x, y) => x.hp / x.maxHp - y.hp / y.maxHp)
+          // Chain-stun: don't overlap our own disable still running on this hero.
+          .filter(
+            (f) =>
+              !(
+                disabler &&
+                f.type === "hero" &&
+                holdDisable(board.disableLeft(f.id, clock), travel(f))
+              ),
+          )
+          // Blackboard focus: the locked target first, then the weakest.
+          .toSorted(
+            (x, y) =>
+              (lock?.target === y.id ? 1 : 0) - (lock?.target === x.id ? 1 : 0) ||
+              x.hp / x.maxHp - y.hp / y.maxHp,
+          )
         if (inRange[0]) targets = [inRange[0]]
         at = targets[0] ?? b
         break
@@ -1229,18 +1423,68 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       }
     }
     if (targets.length === 0) return false
+    // Focus metric: enemy-hero casts while our lock is live and its target is in range.
+    if (lock && tg.kind === "enemy" && targets[0]!.type === "hero") {
+      const inReach = heroFoes.some((f) => f.id === lock.target && dist(b, f) <= tg.range)
+      if (inReach) {
+        lockCasts.total++
+        if (targets[0]!.id === lock.target) lockCasts.onLock++
+      }
+    }
+    // Chain-stun for area disables: wait while every hero caught is still held by us.
+    if (
+      disabler &&
+      radius > 0 &&
+      targets.some((x) => x.type === "hero") &&
+      targets
+        .filter((x) => x.type === "hero")
+        .every((x) => holdDisable(board.disableLeft(x.id, clock), 0))
+    )
+      return false
+    h.mana -= cost
 
-    // Dash first (moves caster toward the target).
+    // Dash first (moves caster toward the target); forced displacement
+    // grants free pathing (spec/11 layer 4).
     const dash = ability.effects.find((e) => e.type === "dash")
     if (dash && dash.type === "dash" && at !== b) {
       const d = dist(b, at)
       const k = Math.max(0, Math.min(1, (d - 1) / d))
       b.x += (at.x - b.x) * k
       b.z += (at.z - b.z) * k
+      b.freePath = FREE_PATH_T
+      b.velMag = 0
     }
-    applyEffects(b, targets, ability)
     const style = ability.fx
-    if (radius > 0)
+    if (projectileAbility(ability) && at !== b) {
+      // Travelling spell (spec/09): homing for single target, sweeping for lines.
+      const line = tg.kind === "line"
+      const d = dist(b, at) || 1
+      projectiles.push({
+        caster: b,
+        ability,
+        line,
+        target: line ? undefined : targets[0],
+        x: b.x,
+        z: b.z,
+        dx: (at.x - b.x) / d,
+        dz: (at.z - b.z) / d,
+        left: line && "range" in tg ? tg.range : 99,
+        width: line && "width" in tg ? tg.width : 0,
+        hit: new Set(),
+      })
+      fx({
+        t: clock,
+        kind: "projectile",
+        from: { x: b.x, z: b.z },
+        to: { x: at.x, z: at.z },
+        duration: d / PROJECTILE_SPEED,
+        team: b.team,
+        style,
+      })
+    } else applyEffects(b, targets, ability)
+    if (projectileAbility(ability) && at !== b) {
+      // fx already emitted
+    } else if (radius > 0)
       fx({ t: clock, kind: "aoe", at: { x: at.x, z: at.z }, radius, team: b.team, style })
     else if (at !== b)
       fx({
@@ -1264,36 +1508,38 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     return true
   }
 
-  // --- movement --------------------------------------------------------------------
-  const nav = createNav(map)
+  // --- movement (spec/11 locomotion: turn-rate gate, clearance nav, wall slide) ----
+  const nav = new DynamicNav(map)
 
-  /** Straight step toward a point (used inside fights, where paths are short and open). */
+  /**
+   * Turn-gated step toward a point: rotate toward the goal; accelerate
+   * along the heading only inside the 0.2 rad gate; slide along walls.
+   */
   const stepToward = (b: Body, goal: { x: number; z: number }, stopAt: number, dt: number) => {
     if (b.st.stun > 0 || b.st.root > 0) return
-    const d = dist(b, goal)
-    if (d <= stopAt) return
     const chasing =
       b.hero?.def.attack === "melee" && b.target?.type === "hero" && b.hero.intent === "fight"
     const spd =
       b.speed * statMul(b, "speed") * (1 - (b.st.slowT > 0 ? b.st.slow : 0)) * (chasing ? 1.12 : 1)
-    const step = Math.min(d - stopAt, spd * dt)
-    const nx = b.x + ((goal.x - b.x) / d) * step
-    const nz = b.z + ((goal.z - b.z) / d) * step
-    b.heading = Math.atan2(nx - b.x, nz - b.z)
-    b.x = nx
-    b.z = nz
+    const save = b.speed
+    b.speed = spd
+    moveBody(b, nav, goal, stopAt, dt)
+    b.speed = save
   }
 
-  /** Travel to a far goal along an A* path (cached per body+goal). */
+  /** Travel to a far goal along a clearance-aware A* path (cached per body+goal). */
   const travel = (b: Body, goal: Vec2, stopAt: number, dt: number) => {
     if (dist(b, goal) <= stopAt) return
-    const key = `${Math.floor(goal.x)},${Math.floor(goal.z)}`
+    const r = b.radius ?? HULL.creep
+    const free = (b.freePath ?? 0) > 0
+    const key = `${Math.floor(goal.x)},${Math.floor(goal.z)}:${r}:${free ? 1 : 0}`
     if (b.pathKey !== key || !b.path || b.path.length === 0) {
-      b.path = [...nav.path(b, goal)]
+      b.path = [...nav.path(b, goal, r, { ignoreForest: free })]
       b.pathKey = key
     }
+    const accept = r + 0.1
     let wp = b.path[0]!
-    while (b.path.length > 1 && dist(b, wp) < 0.6) {
+    while (b.path.length > 1 && dist(b, wp) < accept) {
       b.path.shift()
       wp = b.path[0]!
     }
@@ -1329,16 +1575,6 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     return f
   }
 
-  const nearestCamp = (b: Body) => {
-    const own = map.camps.filter((c) => c.team === b.team)
-    const alive = own.filter((c) =>
-      bodies.some((x) => x.alive && x.type === "neutral" && x.home?.campId === c.id),
-    )
-    return alive.toSorted((a, c) => dist(b, a.position) - dist(b, c.position))[0]
-  }
-
-  const enemyHeroesNear = (b: Body, r: number) =>
-    heroes.filter((h) => h.alive && h.team !== b.team && dist(h, b) <= r)
   const alliesNear = (b: Body, r: number) =>
     heroes.filter((h) => h.alive && h.team === b.team && dist(h, b) <= r)
   const enemyTowerNear = (b: Body, r: number) =>
@@ -1413,9 +1649,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   // --- next purchase (build preset + adaptive rule) ---------------------------------------
   const nextItemOf = (h: HeroState): { id: string; adaptive: boolean } | null => {
-    if (h.items.length >= MAX_ITEMS) return null
+    if (countItems(h.inv) >= MAIN_SLOTS + BACKPACK_SLOTS) return null
     const pt = ptac(h)
-    if (pt.adaptive && !h.adaptiveDone && h.items.length >= 1) {
+    if (pt.adaptive && !h.adaptiveDone && countItems(h.inv) >= 1) {
       const total = h.taken.magic + h.taken.physical
       const enemyIds = draft.picks[otherSide(h.side)].map((p) => p.heroId)
       const magicShare =
@@ -1427,6 +1663,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if (1 - magicShare >= 0.65 && itemSum(h, "armor") === 0)
         return { id: "plate", adaptive: true }
     }
+    const def = h.defensiveDone
+      ? null
+      : defensivePurchase(
+          h.role,
+          hasTag(h.def.id, "initiator") && h.def.attack === "melee",
+          h.buildIdx,
+          h.items,
+        )
+    if (def) return { id: def, adaptive: false }
     const id = buildById(pt.build).items[h.buildIdx]
     return id ? { id, adaptive: false } : null
   }
@@ -1438,9 +1683,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       const cost = itemById(next.id).cost
       if (h.gold < cost) return
       h.gold -= cost
-      h.items.push(next.id)
+      addItem(h.inv, next.id)
+      h.items = effectiveItems(h.inv, clock)
       if (next.adaptive) h.adaptiveDone = true
       else h.buildIdx++
+      if (["bkb", "blink", "force", "eul"].includes(next.id)) h.defensiveDone = true
       purchases.push({
         t: clock,
         side: h.side,
@@ -1463,33 +1710,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     h.goal = gathered || b === lead ? { x: obj.x, z: obj.z } : { x: lead.x, z: lead.z }
     return true
   }
-  const goFarm = (b: Body, h: HeroState): boolean => {
-    if (h.role === "support" && h.slot !== "jungle") return false
-    const camp = nearestCamp(b)
-    if (!camp) return false
-    h.intent = "jungle"
-    h.goal = camp.position
-    return true
-  }
   const goLane = (b: Body, h: HeroState, laneId: LaneId) => {
     h.intent = "lane"
     h.goal = laneFront(b.team as Team, laneId)
-  }
-  const goGank = (b: Body, h: HeroState, target: Body) => {
-    h.intent = "gank"
-    h.goal = { x: target.x, z: target.z }
-  }
-  /** Farm-priority players keep farming until 2+ allies are already at the objective. */
-  const lateJoiner = (b: Body, h: HeroState) => {
-    // Only mid game, never the group's lead, and only while someone else is forming the group.
-    if (behaviorOf(h).farm <= 50 || phase !== "mid" || coreOf(h.side) === b) return false
-    const eager = heroes.filter(
-      (x) => x.alive && x.hero!.side === h.side && behaviorOf(x.hero!).farm <= 50,
-    ).length
-    if (eager === 0) return false
-    const obj = objectiveFor(b.team as Team)
-    if (!obj) return false
-    return heroes.filter((x) => x.alive && x.team === b.team && dist(x, obj) < 12).length < 2
   }
   const defendSpot = (team: Team) => {
     const own = [...structureBodies.values()].filter(
@@ -1505,48 +1728,118 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const enemiesDead = (side: DraftSide) =>
     heroes.filter((x) => x.hero!.side !== side && !x.alive).length
 
+  // --- Hero Think (spec/09) -----------------------------------------------------------
+  const brain = createBrain<Body>({
+    heroes,
+    clock: () => clock,
+    phase: () => phase,
+    plans: (side) => tac[side].plans,
+    behavior: (b) => behaviorOf(b.hero!),
+    aggression: (b) => aggressionOf(b.hero!),
+    knowledge: (side) => knowledge[side],
+    fountain: (side) => fountain(SIDE_TEAM[side]),
+    laneFront: (side, lane) => laneFront(SIDE_TEAM[side], lane),
+    slotLane: (b) => slotLane(b.hero!),
+    camps: (side) =>
+      map.camps.filter(
+        (c) =>
+          c.team === SIDE_TEAM[side] &&
+          bodies.some((x) => x.alive && x.type === "neutral" && x.home?.campId === c.id),
+      ),
+    enemyTowers: (side) =>
+      [...structureBodies.values()].filter(
+        (t) => t.alive && t.type === "tower" && t.team !== SIDE_TEAM[side],
+      ),
+    objective: (side) => {
+      const o = objectiveFor(SIDE_TEAM[side])
+      return o ? { x: o.x, z: o.z } : null
+    },
+    isCore: (b) => coreOf(b.hero!.side) === b,
+    roshanUp: () => bodies.some((x) => x.alive && x.type === "roshan"),
+    nextItemCost: (b) => {
+      const n = nextItemOf(b.hero!)
+      return n ? itemById(n.id).cost : null
+    },
+    manaCost: (b, isUlt) => manaCost(b.hero!, isUlt),
+    stall: () => clock >= ANTI_STALL_AT,
+    item: lookupItem,
+  })
+
+  /** Apply one macro decision to the hero's intent/goal. */
+  const applyDecision = (b: Body, h: HeroState, r: ThinkResult, igl: IglCall | null) => {
+    switch (r.action) {
+      case "retreat":
+        h.intent = "retreat"
+        h.goal = fountain(b.team as Team)
+        return
+      case "save": {
+        const ally = heroes.find((x) => x.id === r.save)
+        h.saveId = r.save
+        h.intent = "save"
+        h.goal = ally ? { x: ally.x, z: ally.z } : null
+        return
+      }
+      case "fight":
+        h.intent = "fight"
+        h.goal = r.fightAt ?? null
+        return
+      case "gank":
+        h.intent = "gank"
+        h.goal = r.gank?.at ?? null
+        return
+      case "objective": {
+        if (r.mode === "roshan") {
+          h.intent = "roshan"
+          h.goal = roshanPos
+          return
+        }
+        if (r.mode === "defend") {
+          const spot = igl?.kind === "defend" && igl.at ? igl.at : defendSpot(b.team as Team)
+          h.intent = "group"
+          h.goal = { x: spot.x, z: spot.z }
+          return
+        }
+        if (r.mode === "split" && r.splitAt) {
+          h.intent = "push"
+          h.goal = r.splitAt
+          return
+        }
+        const pushing = calls[h.side].active === "push" || igl?.kind === "push"
+        if (goGroup(b, h, pushing ? "push" : "group", phase === "late" ? 4 : pushing ? 2 : 3))
+          return
+        goLane(b, h, slotLane(h) ?? "mid")
+        return
+      }
+      case "farm":
+        if (r.farm?.kind === "camp") {
+          h.intent = "jungle"
+          h.goal = r.farm.at
+          return
+        }
+        goLane(b, h, (r.farm?.id as LaneId | undefined) ?? slotLane(h) ?? "mid")
+        return
+    }
+  }
+
   const think = (b: Body) => {
     const h = b.hero!
     const side = h.side
     const coach =
       calls[side].active && relayAt[side] === null && h.followCoach ? calls[side].active : null
     const igl = iglCall[side] && h.followIgl ? iglCall[side] : null
-    const hpPct = b.hp / b.maxHp
-    const sense = h.player.sense / 20
-    const aggr = aggressionOf(h)
-    const foes = enemyHeroesNear(b, 9).filter((f) => seen(b, f))
-    const friends = alliesNear(b, 9)
-    const myPower = friends.reduce((s, f) => s + (f.hp / f.maxHp) * (1 + f.hero!.level * 0.15), 0)
-    const theirPower = foes.reduce((s, f) => s + (f.hp / f.maxHp) * (1 + f.hero!.level * 0.15), 0)
-    const scale = phase === "laning" && tac[side].plans.laning === "scale" && h.slot !== "jungle"
-    const retreatAt =
-      (coach === "safe" ? 0.45 : 0.3) -
-      sense * 0.08 +
-      (coach === "push" ? -0.05 : 0) -
-      ((aggr - 50) / 50) * 0.1 +
-      (scale ? 0.08 : 0)
-
-    // Retreat: low hp, or outnumbered and hurt (cautious players bail earlier).
-    if (
-      hpPct < retreatAt ||
-      (theirPower > myPower * (1.6 + (aggr - 50) / 100) && hpPct < 0.6 && sense > 0.55)
-    ) {
-      h.intent = "retreat"
-      h.goal = fountain(b.team as Team)
-      return
-    }
-    if (h.intent === "retreat" && hpPct < 0.85) return
-
-    // Fight: enemies close and we're not badly outnumbered (aggression moves the bar).
-    const ratio =
-      coach === "safe" ? 1.2 : aggr <= 50 ? 1.2 - 0.008 * aggr : 0.8 - 0.002 * (aggr - 50)
-    if (foes.length && myPower >= theirPower * ratio) {
-      h.intent = "fight"
-      h.goal = null
+    const r = brain.think(b, {
+      coach,
+      igl: igl?.kind ?? null,
+      iglTarget: igl?.kind === "gank" ? igl.target?.id : undefined,
+    })
+    h.lastAction = r.action
+    h.scores = r.scores
+    if (r.action === "retreat" || r.action === "save" || r.engage) {
+      applyDecision(b, h, r, igl)
       return
     }
 
-    // Shopping: always at base; `on-item` walks home for an affordable item.
+    // Shopping (spec/06): always at base; `on-item` walks home for an affordable item.
     const atBase = dist(b, fountain(b.team as Team)) < 14
     if (atBase) buy(b)
     const next = nextItemOf(h)
@@ -1555,20 +1848,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       next &&
       tac[side].shopTiming === "on-item" &&
       h.gold >= itemById(next.id).cost + 300 + behaviorOf(h).farm * 4 &&
-      !visibleEnemyHeroes(side).some((e) => dist(e, b) < 9)
+      brain.known(side, 0).every((e) => dist(e.pos, b) >= 9)
     ) {
       h.intent = "shop"
       h.goal = fountain(b.team as Team)
       return
     }
     if (h.intent === "shop" && !atBase && next && h.gold >= itemById(next.id).cost) return
-    if (igl?.kind === "back") {
-      h.intent = "shop"
-      h.goal = fountain(b.team as Team)
-      return
-    }
-
-    // Warding: the team's warder spends charges on the highest-priority open spot.
+    // Warding (spec/06): the team's warder spends charges on the best open spot.
     if (wardStock[side].charges > 0 && warderOf(side) === b && !coach) {
       const spot = wardTarget(side)
       if (spot) {
@@ -1577,115 +1864,241 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         return
       }
     }
+    applyDecision(b, h, r, igl)
+  }
 
-    const roshanUp = bodies.some((x) => x.alive && x.type === "roshan")
-    // 1) Coach calls (relayed by the IGL, followed per player).
-    if (coach === "roshan" && roshanUp) {
-      h.intent = "roshan"
-      h.goal = roshanPos
-      return
+  // --- item actives & spell projectiles (spec/09) --------------------------------------
+  const activeUses: Record<string, number> = { bkb: 0, blink: 0, force: 0, eul: 0 }
+  let fizzled = 0
+  const useActive = (b: Body, id: string, cd: number, text: string) => {
+    b.hero!.itemCd[id] = cd
+    activeUses[id] = (activeUses[id] ?? 0) + 1
+    fx({
+      t: clock,
+      kind: "aoe",
+      at: { x: b.x, z: b.z },
+      radius: 1.2,
+      team: b.team,
+      style: "shield",
+    })
+    feed.push({ t: clock, kind: "item", side: b.hero!.side, text: `${heroLabel(b)} ${text}` })
+  }
+  /** Move a body up to `to`, stopping at the last walkable point on the way. */
+  const displace = (b: Body, to: Vec2) => {
+    const steps = 12
+    let px = b.x
+    let pz = b.z
+    for (let i = 1; i <= steps; i++) {
+      const x = b.x + ((to.x - b.x) * i) / steps
+      const z = b.z + ((to.z - b.z) * i) / steps
+      if (!map.isWalkable(x, z)) break
+      px = x
+      pz = z
     }
-    if ((coach === "group" || coach === "push") && goGroup(b, h, coach, coach === "push" ? 2 : 3))
-      return
-    if (coach === "farm" && goFarm(b, h)) return
-
-    // 2) IGL tactical calls.
-    if (igl) {
-      if (igl.kind === "gank" && igl.target?.alive && dist(b, igl.target) < 30) {
-        goGank(b, h, igl.target)
-        return
-      }
-      if (igl.kind === "defend" && igl.at) {
-        h.intent = "group"
-        h.goal = igl.at
-        return
-      }
-      if ((igl.kind === "push" || igl.kind === "group") && !lateJoiner(b, h))
-        if (goGroup(b, h, igl.kind === "push" ? "push" : "group", igl.kind === "push" ? 2 : 3))
-          return
+    b.x = px
+    b.z = pz
+    b.path = undefined
+    b.freePath = FREE_PATH_T
+    b.velMag = 0
+  }
+  const closestKnownEnemy = (b: Body) =>
+    brain
+      .known(b.hero!.side, 0)
+      .filter((e) => e.visible)
+      .toSorted((x, y) => dist(x.pos, b) - dist(y.pos, b) || (x.id < y.id ? -1 : 1))[0]
+  /** Distance to the nearest lit enemy spell projectile heading for this hero. */
+  const incomingProjectile = (b: Body) => {
+    const side = b.hero!.side
+    let best = Infinity
+    for (const p of projectiles) {
+      if (p.caster.team === b.team) continue
+      if (!isVisibleToTeam(visionGrid[side], staticFog, p)) continue
+      const d = dist(p, b)
+      const aimed = p.line
+        ? (b.x - p.x) * p.dx + (b.z - p.z) * p.dz > 0 &&
+          Math.abs((b.x - p.x) * p.dz - (b.z - p.z) * p.dx) <= p.width + 0.5
+        : p.target === b
+      if (aimed && d < best) best = d
     }
+    return best
+  }
 
-    // 3) Phase plans.
-    const plans = tac[side].plans
-    const stall = clock >= ANTI_STALL_AT
-    if (phase === "laning") {
-      const roamer =
-        h.slot === "roam" ||
-        (plans.laning === "roam" &&
-          h.slot === "jungle" &&
-          !heroes.some((x) => x.hero!.side === side && x.hero!.slot === "roam"))
-      if (roamer) {
-        const prey = visibleEnemyHeroes(side)
-          .filter((e) => e.hp / e.maxHp <= 0.6 && dist(e, b) < 20)
-          .toSorted((x, y) => x.hp / x.maxHp - y.hp / y.maxHp)[0]
-        if (prey) {
-          goGank(b, h, prey)
-          return
+  /** Layer 3 item triggers; returns true if the hero spent its tick on an active. */
+  const microItems = (b: Body): boolean => {
+    const h = b.hero!
+    if (b.st.stun > 0 || b.st.cyclone > 0) return false
+    const enemies = brain.known(h.side, 0).filter((e) => e.visible)
+    const near7 = enemies.filter((e) => dist(e.pos, b) <= 7).length
+    const fightStart = near7 > 0 && clock - h.lastEnemyNear >= 10
+    if (near7 > 0) h.lastEnemyNear = clock
+    const readySet = new Set(
+      (["bkb", "blink", "force", "eul"] as const).filter((id) => ready(h, id)),
+    )
+    if (readySet.size === 0) return false
+    const use = defensiveTrigger({
+      hpPct: b.hp / b.maxHp,
+      stunned: false,
+      ready: readySet,
+      sinceHeroDamage: clock - h.lastHeroDamage,
+      incomingProjectile: incomingProjectile(b),
+      enemiesClose: enemies.filter((e) => dist(e.pos, b) <= 4).length,
+      enemiesNear: near7,
+      role: h.role,
+      fightStart,
+    })
+    const threat = closestKnownEnemy(b)
+    if (use?.item === "bkb") {
+      b.st.immune = BKB_DURATION
+      b.st.root = 0
+      b.st.slow = 0
+      b.st.dots = []
+      useActive(b, "bkb", lookupItem("bkb").active!.cooldown, "activates Black King Bar")
+      return false
+    }
+    if (use?.item === "eul") {
+      b.st.cyclone = EUL_DURATION
+      b.st.dots = []
+      useActive(b, "eul", lookupItem("eul").active!.cooldown, "cyclones out with Eul's Scepter")
+      return true
+    }
+    if (use?.item === "force" && threat) {
+      displace(b, awayFrom(b, threat.pos, FORCE_DISTANCE))
+      useActive(b, "force", lookupItem("force").active!.cooldown, "forces out of danger")
+      return true
+    }
+    if (use?.item === "blink") {
+      const home = fountain(b.team as Team)
+      const d = dist(b, home) || 1
+      const k = Math.min(1, 8 / d)
+      displace(b, { x: b.x + (home.x - b.x) * k, z: b.z + (home.z - b.z) * k })
+      useActive(b, "blink", lookupItem("blink").active!.cooldown, "blinks away")
+      h.intent = "retreat"
+      h.goal = home
+      return true
+    }
+    // Support save with Force Staff: push the endangered ally away from its attacker.
+    if (h.intent === "save" && readySet.has("force") && h.saveId) {
+      const ally = heroes.find((x) => x.id === h.saveId)
+      if (ally?.alive && dist(ally, b) <= 6) {
+        const foe = brain
+          .known(h.side, 0)
+          .filter((e) => e.visible)
+          .toSorted((x, y) => dist(x.pos, ally) - dist(y.pos, ally))[0]
+        if (foe && dist(foe.pos, ally) <= 8) {
+          displace(ally, awayFrom(ally, foe.pos, FORCE_DISTANCE))
+          useActive(b, "force", lookupItem("force").active!.cooldown, `saves ${heroLabel(ally)}`)
+          return true
         }
-        const lanesCycle: readonly LaneId[] = ["top", "mid", "bot"]
-        goLane(b, h, lanesCycle[Math.floor(clock / 45) % 3]!)
-        return
       }
-      if (h.slot === "jungle") {
-        if (goFarm(b, h)) return
-        goLane(b, h, "mid")
-        return
-      }
-      goLane(b, h, slotLane(h) ?? "mid")
-      return
     }
+    // Initiator engage: Blink onto a fight target, then the disable chains this tick.
+    if (
+      readySet.has("blink") &&
+      clock - h.lastHeroDamage >= 3 &&
+      (h.intent === "fight" || h.intent === "gank") &&
+      hasTag(h.def.id, "initiator")
+    ) {
+      const lock = brain.board(h.side).lock(clock)
+      const target =
+        enemies.find((e) => e.id === lock?.target && dist(e.pos, b) <= BLINK_RANGE) ??
+        enemies
+          .filter((e) => dist(e.pos, b) <= BLINK_RANGE && dist(e.pos, b) > 3)
+          .toSorted((x, y) => x.hpFrac - y.hpFrac || (x.id < y.id ? -1 : 1))[0]
+      const disableReady =
+        (h.skillCd <= 0 && hasDisableEffect(h.def.skill)) ||
+        (h.level >= 6 && h.ultCd <= 0 && hasDisableEffect(h.def.ultimate))
+      if (
+        target &&
+        initiatorEngage({
+          blinkReady: true,
+          disableReady,
+          alliesNear: alliesNear(b, 10).length - 1,
+          ganking: h.intent === "gank",
+          targetDist: dist(target.pos, b),
+        })
+      ) {
+        displace(b, blinkLanding(b, target.pos))
+        brain.board(h.side).setLock(target.id, b.id, clock)
+        useActive(b, "blink", lookupItem("blink").active!.cooldown, "blinks in")
+        return false
+      }
+    }
+    return false
+  }
 
-    const mid = phase === "mid"
-    const plan: string = mid ? plans.mid : plans.late
-    const effective = stall && (plan === "defend" || plan === "farm") ? "siege" : plan
-    if (!mid && effective === "roshan" && roshanUp) {
-      const ready = heroes.filter((x) => x.alive && x.team === b.team).length >= 4
-      if (ready) {
-        h.intent = "roshan"
-        h.goal = roshanPos
-        return
-      }
-    }
-    if (effective === "defend") {
-      if (enemiesDead(side) >= 2 && goGroup(b, h, "push", 3)) return
-      const spot = defendSpot(b.team as Team)
-      h.intent = "group"
-      h.goal = { x: spot.x, z: spot.z }
-      return
-    }
-    if (effective === "farm") {
-      if (goFarm(b, h)) return
-      goLane(b, h, slotLane(h) ?? "mid")
-      return
-    }
-    if (effective === "pickoff") {
-      const prey = visibleEnemyHeroes(side).find(
-        (e) =>
-          dist(e, b) < 30 &&
-          !heroes.some((o) => o !== e && o.alive && o.team === e.team && dist(o, e) < 8) &&
-          heroes.filter((a) => a.alive && a.team === b.team && dist(a, e) < 25).length >= 2,
+  /** Positioning ring: initiator holds outside vision; ranged heroes kite melee. */
+  const microMove = (b: Body, dt: number): boolean => {
+    const h = b.hero!
+    if (h.intent !== "fight" && h.intent !== "gank") return false
+    if (b.st.stun > 0 || b.st.root > 0) return false
+    const enemies = brain.known(h.side, 0).filter((e) => e.visible)
+    if (!enemies.length) return false
+    if (h.def.attack === "ranged") {
+      const v = kiteVector(
+        b,
+        b.range,
+        enemies.map((e) => ({
+          x: e.pos.x,
+          z: e.pos.z,
+          melee: heroes.find((x) => x.id === e.id)!.hero!.def.attack === "melee",
+        })),
       )
-      if (prey) {
-        goGank(b, h, prey)
-        return
+      if (v && b.cooldown > 0) {
+        stepToward(b, { x: b.x + v.x * 2, z: b.z + v.z * 2 }, 0, dt)
+        return true
       }
-      // Nothing to hunt: farm, and group once the team has levels.
-      if (h.level < 9 && goFarm(b, h)) return
+      return false
     }
-    if (effective === "split" && coreOf(side) === b) {
-      const obj = objectiveFor(b.team as Team)
-      const far = (["top", "mid", "bot"] as const)
-        .map((l) => ({ l, at: laneFront(b.team as Team, l) }))
-        .toSorted((x, y) => (obj ? dist(y.at, obj) - dist(x.at, obj) : 0))[0]!
-      h.intent = "push"
-      h.goal = far.at
-      return
+    if (hasTag(h.def.id, "initiator") && ready(h, "blink") && h.intent === "fight") {
+      const nearest = closestKnownEnemy(b)!
+      const allies = alliesNear(b, 12).length - 1
+      if (allies === 0) {
+        const hold = holdPoint(b, nearest.pos)
+        if (hold) {
+          stepToward(b, hold, 0.3, dt)
+          return true
+        }
+        return true
+      }
     }
-    // group / siege / roshan (Roshan down) / split (non-splitters) / pickoff fallback.
-    if (lateJoiner(b, h) && (goFarm(b, h) || (slotLane(h) && (goLane(b, h, slotLane(h)!), true))))
-      return
-    if (goGroup(b, h, "group", mid ? 3 : 4)) return
-    goLane(b, h, slotLane(h) ?? "mid")
+    return false
+  }
+
+  const tickProjectiles = (dt: number) => {
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const p = projectiles[i]!
+      const step = PROJECTILE_SPEED * dt
+      if (!p.line) {
+        const t = p.target!
+        if (!t.alive || t.st.cyclone > 0) {
+          fizzled++
+          projectiles.splice(i, 1)
+          continue
+        }
+        const d = dist(p, t)
+        if (d <= step + 0.4) {
+          applyEffects(p.caster, [t], p.ability)
+          projectiles.splice(i, 1)
+          continue
+        }
+        p.x += ((t.x - p.x) / d) * step
+        p.z += ((t.z - p.z) / d) * step
+        continue
+      }
+      p.x += p.dx * step
+      p.z += p.dz * step
+      p.left -= step
+      const hits: Body[] = []
+      for (const o of near(p, p.width + 1)) {
+        if (p.hit.has(o.id) || o.structure || !isEnemy(p.caster, o)) continue
+        if (dist(o, p) <= p.width + 0.4) {
+          p.hit.add(o.id)
+          hits.push(o)
+        }
+      }
+      if (hits.length) applyEffects(p.caster, hits, p.ability)
+      if (p.left <= 0) projectiles.splice(i, 1)
+    }
   }
 
   // Spatial hash (4×4 tile cells), rebuilt once per tick: target queries stay O(nearby).
@@ -1740,7 +2153,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if (b.type === "hero") {
         const sense = b.hero!.player.sense / 20
         if (o.type === "hero" && !seen(b, o)) continue
-        if (o.type === "hero") score += 8 + heroPriority(b.hero!, o) * sense
+        if (o.type === "hero") {
+          score += 8 + heroPriority(b.hero!, o) * sense
+          // Blackboard focus: +50 % hero score on the initiator's locked target.
+          const lock = brain.board(b.hero!.side).lock(clock)
+          if (lock?.target === o.id && dist(b, o) <= LOCK_RADIUS)
+            score += (8 + heroPriority(b.hero!, o) * sense) * LOCK_BONUS
+        }
         // Last-hit creeps: prefer low hp ones the hero can kill.
         if (o.type === "creep") score += o.hp < b.damage * 1.2 ? 6 * sense + 2 : 0
         if (o.structure) score += b.hero!.intent === "push" || b.hero!.intent === "group" ? 6 : 2
@@ -1806,6 +2225,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const tickStatus = (b: Body, dt: number) => {
     const s = b.st
     s.stun = Math.max(0, s.stun - dt)
+    s.immune = Math.max(0, s.immune - dt)
+    s.cyclone = Math.max(0, s.cyclone - dt)
     s.root = Math.max(0, s.root - dt)
     s.slowT = Math.max(0, s.slowT - dt)
     if (s.slowT === 0) s.slow = 0
@@ -1915,11 +2336,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
   }
 
-  /** Tree destruction (spec/08 §4c): opens vision immediately via dirty recompute. */
+  /** Tree destruction (spec/08 §4c): opens vision and paths immediately. */
   const cutTree = (x: number, z: number): boolean => {
     const ok = destroyTree(staticFog, { x, z })
     if (ok) {
       cutTrees.push({ x, z, regrowAt: clock * 10 + TREE_REGROW_TICKS })
+      nav.cutTree({ x, z }) // spec/11: dynamic nav dirty update
       visionTimer = 0 // dirty: recompute on the next tick
     }
     return ok
@@ -2047,7 +2469,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const alive = mine.filter((x) => x.alive)
     // Spike: carry finished its 2nd item.
     const core = coreOf(side)
-    if (tac[side].spike && !spikeFired[side] && core && core.hero!.items.length >= 2) {
+    if (tac[side].spike && !spikeFired[side] && core && countItems(core.hero!.inv) >= 2) {
       spikeFired[side] = true
       if (phase !== "laning") {
         issueIgl(side, { kind: "group", remaining: IGL_CALL_DURATION }, IGL_TEXT.group)
@@ -2109,14 +2531,21 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     visionTimer -= dt
     if (visionTimer <= 0) {
       updateVision()
+      brain.updateThreat()
       visionTimer = 0.5
     }
     // Tree regrowth (spec/08 §4c): retry while occupied.
     if (cutTrees.length > 0) {
       const before = cutTrees.length
-      regrowTrees(staticFog, cutTrees, clock * 10, (p) =>
-        bodies.some((b) => b.alive && Math.abs(b.x - p.x) < 1 && Math.abs(b.z - p.z) < 1),
-      )
+      const regrown: Vec2[] = []
+      regrowTrees(staticFog, cutTrees, clock * 10, (p) => {
+        const occ = bodies.some(
+          (b) => b.alive && Math.abs(b.x - p.x) < 1 && Math.abs(b.z - p.z) < 1,
+        )
+        if (!occ) regrown.push(p)
+        return occ
+      })
+      if (regrown.length) for (const p of regrown) nav.regrowTree(p) // spec/11
       if (cutTrees.length < before) visionTimer = 0
     }
     tickWards(dt)
@@ -2202,7 +2631,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       tickStatus(b, dt)
       if (!b.alive) continue
       b.cooldown = Math.max(0, b.cooldown - dt)
+      // Locomotion timers (spec/11): phase + free-pathing decay.
+      if (b.phase! > 0) b.phase = Math.max(0, b.phase! - dt)
+      if (b.freePath! > 0) b.freePath = Math.max(0, b.freePath! - dt)
     }
+    // Spell projectiles move and resolve after status, before hero actions (spec/09).
+    tickProjectiles(dt)
 
     // Heroes
     for (const b of heroes) {
@@ -2219,17 +2653,29 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           h.intent = "lane"
           h.rethink = 0
         }
+        brain.release(h.side, b.id)
         continue
       }
       h.gold += PASSIVE_GOLD * dt
       h.goldEarned += PASSIVE_GOLD * dt
+      // Inventory upkeep (spec/10 layer 1): promote backpack items into free
+      // main slots (muted 6 s) and expire mutes into the effective set.
+      while (promoteFirstBackpack(h.inv, clock));
+      const eff = effectiveItems(h.inv, clock)
+      if (eff.length !== h.items.length || eff.some((id, i) => id !== h.items[i])) {
+        h.items = eff
+        recomputeStats(b)
+      }
       sources[h.side].passive += PASSIVE_GOLD * dt
       h.skillCd = Math.max(0, h.skillCd - dt)
       h.ultCd = Math.max(0, h.ultCd - dt)
+      h.mana = Math.min(h.maxMana, h.mana + h.manaRegen * dt)
+      for (const id in h.itemCd) h.itemCd[id] = Math.max(0, h.itemCd[id]! - dt)
       // Fountain regen.
-      if (dist(b, fountain(b.team as Team)) < 6)
+      if (dist(b, fountain(b.team as Team)) < 6) {
         b.hp = Math.min(b.maxHp, b.hp + b.maxHp * 0.12 * dt)
-      else b.hp = Math.min(b.maxHp, b.hp + (2 + h.level * 0.4) * dt)
+        h.mana = Math.min(h.maxMana, h.mana + h.maxMana * 0.12 * dt)
+      } else b.hp = Math.min(b.maxHp, b.hp + (2 + h.level * 0.4) * dt)
 
       h.rethink -= dt
       if (h.rethink <= 0) {
@@ -2237,7 +2683,24 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         // Reaction time from player sense: 0.3 s (sharp) .. 0.8 s (slow).
         h.rethink = 0.8 - (h.player.sense / 20) * 0.5
       }
-      if (b.st.stun > 0) continue
+      if (b.st.stun > 0 || b.st.cyclone > 0) continue
+      // Layer 3 micro-combat: defensive / engage item triggers, then positioning ring.
+      if (microItems(b)) continue
+
+      // Save: walk to the endangered ally; ally-targeted spells fire via tryCast.
+      if (h.intent === "save") {
+        const ally = heroes.find((x) => x.id === h.saveId)
+        if (ally?.alive) {
+          if (h.def.skill.target.kind === "ally" || h.def.skill.target.kind === "ally-aoe")
+            tryCast(b, h.def.skill, false)
+          if (h.def.ultimate.target.kind === "ally" || h.def.ultimate.target.kind === "ally-aoe")
+            tryCast(b, h.def.ultimate, true)
+          if (dist(b, ally) > 3) {
+            travel(b, { x: ally.x, z: ally.z }, 2.5, dt)
+            continue
+          }
+        }
+      }
 
       // Abilities first.
       if (h.intent !== "retreat" || b.hp / b.maxHp > 0.15) {
@@ -2253,6 +2716,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         if (t && t.type === "hero") attack(b, t)
         continue
       }
+      if (microMove(b, dt)) continue
       const engage =
         h.intent === "fight" ? 9 : h.intent === "jungle" || h.intent === "roshan" ? 4 : 6
       const target = chooseTarget(b, Math.max(engage, b.range))
@@ -2571,6 +3035,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       heroDamage: Math.round(h.heroDamage),
       healing: Math.round(h.healing),
       items: [...h.items],
+      backpack: [...h.inv.backpack],
+      neutral: h.inv.neutral,
+      stash: [...h.inv.stash],
       intent: h.intent,
       aegis: h.aegis,
       netWorth: netWorthOf(h),
@@ -2583,6 +3050,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
             ? h.followIgl
             : null,
       igl: tac[h.side].igl === h.player.id,
+      mana: Math.round(h.mana),
+      maxMana: Math.round(h.maxMana),
+      think: { action: h.lastAction, scores: h.scores },
     }
   }
   const sideSum = (side: DraftSide, f: (h: HeroState) => number) =>
@@ -2693,6 +3163,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     visibleTo: (side: DraftSide, x: number, z: number) =>
       isVisibleToTeam(visionGrid[side], staticFog, { x, z }),
     castCounts: (): ReadonlyMap<string, number> => casts,
+    /** Hero Think counters (spec/09 acceptance): item actives fired, projectiles fizzled. */
+    thinkStats: () => ({ actives: { ...activeUses }, fizzled, lockCasts: { ...lockCasts } }),
     /** Run to completion headlessly (tests, balance reports). */
     runToEnd: (limitSeconds = maxTime + 1) => {
       for (let guard = 0; guard < (limitSeconds / TICK) * 2; guard++) {

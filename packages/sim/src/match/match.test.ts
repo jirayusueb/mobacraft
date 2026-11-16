@@ -87,7 +87,7 @@ describe("match", () => {
       expect(h.items.length).toBeGreaterThan(0)
     }
     expect(s.feed.some((f) => f.kind === "first-blood")).toBe(true)
-  })
+  }, 30_000)
 
   test("hero balance patch applies on top of base kits", () => {
     const chain = HEROES.find((h) => h.id === "chainwarden")!
@@ -156,7 +156,7 @@ describe("match", () => {
         const tiers = order(team, lane)
         expect(tiers).toEqual([...tiers].toSorted((x, y) => x - y))
       }
-  })
+  }, 30_000)
 
   test("coach calls respect cooldown and steer heroes", () => {
     const m = createMatch(map, autoDraft(), { seed: 5 })

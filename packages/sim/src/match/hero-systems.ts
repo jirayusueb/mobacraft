@@ -34,7 +34,7 @@ import { type Purchase, type PurchaseView, choosePurchase, ruleById } from "./bu
 import { type MasteryTier, tierOf } from "./career.ts"
 import type { DraftSide } from "./draft.ts"
 import type { Role } from "./heroes.ts"
-import { itemById } from "./items.ts"
+import { lookupItem } from "./inventory.ts"
 import { createRandom } from "./random.ts"
 
 const inLaning = (t: number) => dotaMinutes(t) < 15
@@ -421,4 +421,4 @@ export const createHeroSystems = (o: HeroSystemsOptions) => {
 
 export type HeroSystems = ReturnType<typeof createHeroSystems>
 
-const itemName = (id: string) => itemById(id).name
+const itemName = (id: string) => lookupItem(id).name

@@ -90,12 +90,14 @@ Per tick, after desired velocities are chosen:
    (radius pairs) by pushing both bodies apart half-half weighted by
    mass (heroes push creeps 2:1), never into blocked cells (the slide
    below runs after separation).
-3. **Body blocking**: a body whose RVO solution would move it _forward
-   past_ a slower, higher-priority body directly in front (centre
-   within 2 × (r₁+r₂), blocker's heading within 0.4 rad of the subject's)
-   instead **yields**: its velocity component along the blocker's
-   heading is clipped to the blocker's speed. Repeated yields
-   reproduce creep blocking — the creep slows behind the hero.
+3. **Body blocking**: a body facing a slower, higher-priority body ahead
+   (centre within 2 × (r₁+r₂), in the front half-plane of the desired
+   heading) instead **yields**: its velocity component along the
+   blocker's heading is clipped to the blocker's speed, and its overall
+   velocity magnitude is capped at the blocker's speed (without the cap,
+   sideways RVO drift lets a body slip past a blocker it still overlaps).
+   Repeated yields reproduce creep blocking — the creep slows behind the
+   hero.
 4. **Phase movement**: `b.phase > 0` skips unit-vs-unit steps 1–3
    (still collides with forest/walls). Set by abilities/items later;
    the field and its handling ship now.
@@ -169,6 +171,9 @@ table overrides from `heroes.ts`, flying movement, Netcode prediction.
 - RVO determinism: fixed candidate ray order, neighbour ordering by
   (distance, id), numeric priority (2/1) and mass (2/1) weights.
 - Body-blocking made testable: yield clips the velocity component along
-  the blocker's heading; thresholds quantified (2× radius sum, 0.4 rad).
+  the blocker's heading plus a speed cap; thresholds quantified (2×
+  radius sum, front half-plane). Found while making test 4 pass: the
+  heading-window variant let RVO sideways drift slip bodies past a
+  still-overlapping blocker.
 - Gate: PASS for this spec (check-gate flags only spec/10, a separate
   workstream).

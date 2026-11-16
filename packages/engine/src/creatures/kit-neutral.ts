@@ -23,8 +23,7 @@ import {
   Quaternion,
   Vector3,
 } from "three/webgpu"
-import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
-import { type BoundPart, bindJoints, type Joint, type JointKind } from "./rig.ts"
+import { bakeModel, type BoundPart, type Joint, type JointKind, type SkeletonSpec } from "./rig.ts"
 
 type V3 = readonly [number, number, number]
 
@@ -64,13 +63,32 @@ class Rig {
   private readonly parts: BoundPart[] = []
   private readonly joints: Joint[] = []
 
+  private spec: SkeletonSpec = {}
+
   constructor(private readonly k = 1) {}
 
-  /** Declare a joint for limb group `limb` at p and, mirrored across x = 0, for −limb. */
-  joint(kind: JointKind, limb: number, p: V3): this {
+  /** Set the skeleton spec (call before build). */
+  withSpec(spec: SkeletonSpec): this {
+    this.spec = spec
+    return this
+  }
+
+  /**
+   * Declare a joint for limb group `limb` at p and, mirrored across x = 0, for −limb.
+   * Single-pivot kinds (head / tail / cape) are never mirrored; pass child/grandchild
+   * to extend the chain.
+   */
+  joint(kind: JointKind, limb: number, p: V3, child?: V3, grandchild?: V3): this {
     const k = this.k
-    this.joints.push({ kind, limb, at: [p[0] * k, p[1] * k, p[2] * k] })
-    if (Math.abs(p[0]) > 1e-6)
+    const mk = (v: V3): V3 => [v[0] * k, v[1] * k, v[2] * k]
+    this.joints.push({
+      kind,
+      limb,
+      at: mk(p),
+      child: child ? mk(child) : undefined,
+      grandchild: grandchild ? mk(grandchild) : undefined,
+    })
+    if (kind !== "head" && kind !== "tail" && kind !== "cape" && Math.abs(p[0]) > 1e-6)
       this.joints.push({ kind, limb: -limb, at: [-p[0] * k, p[1] * k, p[2] * k] })
     return this
   }
@@ -177,6 +195,7 @@ class Rig {
 
   /** Glowing eyes pair (octahedra, ≥ 0.05 across so they read at map scale). */
   eyes(p: V3, r: number, hex: number): this {
+    this.joint("head", 0, [0, p[1] + 0.04, p[2] - 0.06])
     return this.add(
       new OctahedronGeometry(r, 0),
       hex,
@@ -186,17 +205,7 @@ class Rig {
   }
 
   build(): BufferGeometry {
-    bindJoints(this.parts, this.joints)
-    const g = mergeGeometries(
-      this.parts.map((p) => p.geo),
-      false,
-    )
-    if (!g) throw new Error("kit-neutral: merge failed")
-    for (const p of this.parts) p.geo.dispose()
-    g.computeVertexNormals()
-    g.computeBoundingBox()
-    g.computeBoundingSphere()
-    return g
+    return bakeModel(this.parts, this.joints, this.spec)
   }
 }
 
@@ -230,6 +239,7 @@ const kobold = (foreman: boolean): BufferGeometry => {
   r.add(oct(), 0x221a16, { p: [0, 0.395, 0.29], s: 0.03 })
   r.spike([0.07, 0.46, 0.05], [0.2, 0.55, 0.02], 0.05, DARK, { mirror: true })
   r.eyes([0.045, 0.45, 0.15], 0.028, 0xffd040)
+  r.joint("tail", 0, [0, 0.16, -0.06], [0, 0.2, -0.16])
   // Tail.
   r.spike([0, 0.22, -0.08], [0, 0.08, -0.28], 0.035, DARK)
   // Arms (left arm +1); right hand carries the pick.
@@ -254,7 +264,7 @@ const kobold = (foreman: boolean): BufferGeometry => {
   const cy = foreman ? 0.57 : 0.53
   r.add(cyl(0.032, 0.035, 0.08, 5), WAX, { p: [0, cy, 0.05] })
   r.add(oct(), FLAME, { p: [0, cy + 0.075, 0.05], s: [0.035, 0.06, 0.035] }, { glow: 1 })
-  return r.build()
+  return r.withSpec({ pelvisY: 0.26 }).build()
 }
 
 // ─── Spirits (floating) ──────────────────────────────────────────────────────
@@ -292,7 +302,7 @@ const ghost = (): BufferGeometry => {
   // Orbiting spirit motes.
   r.add(oct(), PALE2, { p: [0.26, 0.7, 0.1], s: 0.035 }, { glow: 1 })
   r.add(oct(), PALE2, { p: [-0.24, 0.5, 0.14], s: 0.03 }, { glow: 1 })
-  return r.build()
+  return r.withSpec({ floating: true }).build()
 }
 
 const fellSpirit = (): BufferGeometry => {
@@ -322,7 +332,7 @@ const fellSpirit = (): BufferGeometry => {
   r.eyes([0.04, 0.76, 0.135], 0.03, 0xd8fbff)
   // Hood shoulder tatters.
   r.spike([0.12, 0.7, -0.04], [0.22, 0.58, -0.16], 0.05, HOOD, { mirror: true })
-  return r.build()
+  return r.withSpec({ floating: true }).build()
 }
 
 // ─── Wolves ──────────────────────────────────────────────────────────────────
@@ -342,6 +352,7 @@ const wolf = (alpha: boolean): BufferGeometry => {
   r.bone([0.1, 0.33, -0.26], [0.1, 0.16, -0.33], 0.045, FUR, { limb: -1, mirror: true })
   r.bone([0.1, 0.16, -0.33], [0.1, 0.04, -0.28], 0.035, FUR, { limb: -1, mirror: true })
   r.add(box(0.08, 0.05, 0.11), DARK, { p: [0.1, 0.025, -0.26] }, { limb: -1, mirror: true })
+  r.withSpec({ quadruped: true, pelvisY: 0.42 })
   // Lean body, deep chest.
   r.add(ico(), FUR, { p: [0, 0.42, -0.04], s: [0.15, 0.13, 0.34] })
   r.add(ico(), LIGHT, { p: [0, 0.43, 0.2], s: [0.16, 0.17, 0.16] })
@@ -357,6 +368,7 @@ const wolf = (alpha: boolean): BufferGeometry => {
   r.add(box(0.08, 0.04, 0.13), DARK, { p: [0, 0.44, 0.52], r: [-0.2, 0, 0] })
   r.spike([0.055, 0.59, 0.36], [0.09, 0.73, 0.33], 0.045, DARK, { mirror: true })
   r.eyes([0.06, 0.56, 0.48], 0.03, EYE)
+  r.joint("tail", 0, [0, 0.44, -0.34], [0, 0.55, -0.52], [0, 0.42, -0.7])
   // Bushy tail.
   r.spike([0, 0.46, -0.36], [0, 0.26, -0.62], 0.065, FUR, { seg: 5 })
   if (alpha) {
@@ -369,7 +381,7 @@ const wolf = (alpha: boolean): BufferGeometry => {
     }
     r.spike([0.03, 0.46, 0.58], [0.03, 0.4, 0.6], 0.02, 0xe8e0d0, { mirror: true })
   }
-  return r.build()
+  return r.build() // satyr: biped default
 }
 
 // ─── Satyrs ──────────────────────────────────────────────────────────────────
@@ -431,7 +443,7 @@ const satyr = (trickster: boolean): BufferGeometry => {
     r.spike([0.1, 0.78, -0.03], [0.2, 0.9, -0.1], 0.045, TRIM, { mirror: true })
     r.add(box(0.1, 0.05, 0.16), TRIM, { p: [0.14, 0.79, 0], r: [0, 0, -0.35] }, { mirror: true })
   }
-  return r.build()
+  return r.build() // satyr: biped default
 }
 
 // ─── Centaurs ────────────────────────────────────────────────────────────────
@@ -457,6 +469,7 @@ const centaur = (khan: boolean): BufferGeometry => {
   r.bone([0.14, 0.62, -0.4], [0.15, 0.34, -0.5], 0.065, HIDE, { limb: -1, mirror: true }, 0.05)
   r.bone([0.15, 0.34, -0.5], [0.14, 0.07, -0.43], 0.05, HIDE, { limb: -1, mirror: true })
   r.add(cyl(0.065, 0.075, 0.07, 5), HOOF, { p: [0.14, 0.035, -0.43] }, { limb: -1, mirror: true })
+  r.joint("tail", 0, [0, 1.1, -0.5], [0, 0.9, -0.72])
   // Horse barrel + rump + tail.
   r.add(ico(), HIDE, { p: [0, 0.78, -0.02], s: [0.23, 0.2, 0.52] })
   r.add(ico(), HIDE, { p: [0, 0.82, -0.32], s: [0.21, 0.18, 0.2] })
@@ -499,7 +512,7 @@ const centaur = (khan: boolean): BufferGeometry => {
     r.bone([-0.29, 0.9, 0.6], [-0.29, 1.12, 0.62], 0.025, DARK, { limb: -1, joint: "arm" })
     r.add(box(0.04, 0.3, 0.14), STEEL, { p: [-0.29, 0.74, 0.62] }, { limb: -1, joint: "arm" })
   }
-  return r.build()
+  return r.withSpec({ quadruped: true, pelvisY: 0.95 }).build()
 }
 
 // ─── Hellbears ───────────────────────────────────────────────────────────────
@@ -560,7 +573,7 @@ const hellbear = (smasher: boolean): BufferGeometry => {
     r.add(dod(), 0x1a1418, { p: [0.33, 1.0, 0.04], s: [0.13, 0.1, 0.13] }, { mirror: true })
     r.add(oct(), LAVA, { p: [0.33, 1.08, 0.04], s: [0.05, 0.06, 0.05] }, { glow: 1, mirror: true })
   }
-  return r.build()
+  return r.withSpec({ quadruped: true, pelvisY: 0.5 }).build()
 }
 
 // ─── Drakes ──────────────────────────────────────────────────────────────────
@@ -586,6 +599,7 @@ const drake = (dragon: boolean): BufferGeometry => {
   r.add(ico(), SCALE, { p: [0, 0.48, 0], s: [0.21, 0.19, 0.38] })
   r.add(box(0.16, 0.06, 0.4), BELLY, { p: [0, 0.34, 0.02] })
   r.add(box(0.04, 0.04, 0.3), EMBER, { p: [0, 0.31, 0.02] }, { glow: 1 })
+  r.joint("tail", 0, [0, 0.62, -0.36], [0, 0.58, -0.72], [0, 0.62, -1.05])
   // Spine ridge + tail.
   for (let i = 0; i < 4; i++) {
     const z = 0.22 - i * 0.15
@@ -655,7 +669,7 @@ const drake = (dragon: boolean): BufferGeometry => {
       r.spike([0, 0.4 - i * 0.07, z], [0, 0.5 - i * 0.08, z - 0.08], 0.03, SCALE2)
     }
   }
-  return r.build()
+  return r.withSpec({ quadruped: true, pelvisY: 0.55 }).build()
 }
 
 // ─── Golems ──────────────────────────────────────────────────────────────────
@@ -708,7 +722,7 @@ const golem = (granite: boolean): BufferGeometry => {
   } else {
     r.spike([0.33, 0.93, -0.02], [0.36, 1.02, -0.08], 0.05, DARK, { mirror: true })
   }
-  return r.build()
+  return r.build() // golem: biped default
 }
 
 export const neutralModels: Record<NeutralKind, () => BufferGeometry> = {

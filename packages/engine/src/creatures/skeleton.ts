@@ -301,6 +301,7 @@ export class PoseSolver {
 
   /** Write `count × 12` skinning floats for `inp` into `out` at `offset`. */
   solve(inp: PoseInput, out: Float32Array, offset = 0): void {
+    this.strideLen = inp.stride * 0.5
     this.clips(inp)
     for (let i = 0; i < this.skel.count; i++) this.fk(i)
     this.legIK(inp)

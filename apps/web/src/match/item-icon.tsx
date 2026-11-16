@@ -1,5 +1,5 @@
 /** Item slots for hero frames — a lucide glyph per item id, with name + cost on hover/focus. */
-import { itemById } from "@mobacraft/sim"
+import { lookupItem } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
 import {
   BookOpen,
@@ -43,8 +43,11 @@ const ITEM_TINT: Readonly<Record<string, string>> = {
   "aegis-cloak": "text-cyan-200",
 }
 
+/** Items with painted icons in `public/items/<id>.webp`; others keep the lucide glyph. */
+const ITEM_ART: ReadonlySet<string> = new Set(Object.keys(ITEM_ICON))
+
 export const itemText = (id: string) => {
-  const it = itemById(id)
+  const it = lookupItem(id)
   return `${it.name} · ${it.cost.toLocaleString()} gold`
 }
 
@@ -63,6 +66,26 @@ export const ItemSlot = ({ id, size = 18 }: { id: string | undefined; size?: num
       />
     )
   }
+  if (ITEM_ART.has(id))
+    return (
+      <span
+        className="relative inline-block shrink-0 overflow-hidden rounded-[5px] bg-[#1c1d22] ring-1 ring-white/10 ring-inset"
+        style={{ width: size, height: size }}
+        title={itemText(id)}
+        aria-hidden
+      >
+        <img
+          src={`${import.meta.env.BASE_URL}items/${id}.webp`}
+          alt=""
+          width={size}
+          height={size}
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          className="absolute inset-0 size-full scale-110 object-cover"
+        />
+      </span>
+    )
   const Icon = ITEM_ICON[id] ?? Package
   return (
     <span

@@ -7,7 +7,7 @@ import {
   type DraftState,
   type HeroLine,
   type MatchSnapshot,
-  itemById,
+  lookupItem,
 } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
 import { Sparkles } from "lucide-react"
@@ -92,7 +92,7 @@ export const ItemTimeline = ({ final, you }: { final: MatchSnapshot; you: DraftS
                     ? own
                         .map(
                           (b) =>
-                            `${itemById(b.itemId).name} at ${clockText(b.t)}${b.adaptive ? " (adaptive)" : ""}`,
+                            `${lookupItem(b.itemId).name} at ${clockText(b.t)}${b.adaptive ? " (adaptive)" : ""}`,
                         )
                         .join(", ")
                     : "no purchases"
@@ -104,7 +104,7 @@ export const ItemTimeline = ({ final, you }: { final: MatchSnapshot; you: DraftS
                     key={i}
                     className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2"
                     style={{ left: `${(b.t / tMax) * 100}%` }}
-                    title={`${clockText(b.t)} · ${itemById(b.itemId).name}${b.adaptive ? " · adaptive" : ""}`}
+                    title={`${clockText(b.t)} · ${lookupItem(b.itemId).name}${b.adaptive ? " · adaptive" : ""}`}
                   >
                     <span
                       className={cn(

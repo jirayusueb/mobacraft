@@ -153,6 +153,7 @@ export const INTENT_LABEL: Record<string, string> = {
   gank: "Gank",
   ward: "Ward",
   shop: "Shop",
+  save: "Save",
   dead: "Dead",
 }
 

@@ -7,7 +7,8 @@
  */
 import { type StrategicTag, hasTag } from "./archetypes.ts"
 import type { Role } from "./heroes.ts"
-import { BUILD, MAX_ITEMS, itemById } from "./items.ts"
+import { lookupItem } from "./inventory.ts"
+import { BUILD, MAX_ITEMS } from "./items.ts"
 
 export type Condition =
   | { readonly kind: "enemy-magic-share-above"; readonly share: number }
@@ -129,7 +130,7 @@ export interface Purchase {
   readonly ruleId?: string
 }
 
-const isCore = (id: string) => itemById(id).cost >= 1100
+const isCore = (id: string) => lookupItem(id).cost >= 1100
 
 const holds = (c: Condition, v: PurchaseView): boolean => {
   switch (c.kind) {
@@ -178,7 +179,7 @@ const makeRoom = (v: PurchaseView): string | undefined | null => {
   const ruleItems = new Set(ITEM_RULES.map((r) => r.then.item))
   const sellable = v.items
     .filter((i) => !ruleItems.has(i))
-    .toSorted((a, b) => itemById(a).cost - itemById(b).cost)
+    .toSorted((a, b) => lookupItem(a).cost - lookupItem(b).cost)
   return sellable[0] ?? null
 }
 
@@ -189,10 +190,10 @@ const makeRoom = (v: PurchaseView): string | undefined | null => {
 export const choosePurchase = (v: PurchaseView): Purchase | null => {
   const rule = activeRule(v)
   if (rule) {
-    const item = itemById(rule.then.item)
+    const item = lookupItem(rule.then.item)
     const sell = makeRoom(v)
     if (sell === null) return null
-    const refund = sell ? itemById(sell).cost / 2 : 0
+    const refund = sell ? lookupItem(sell).cost / 2 : 0
     if (v.gold + refund < item.cost) return null // save up — the rule outranks the book
     return { itemId: item.id, fromBook: false, ruleId: rule.id, ...(sell ? { sell } : {}) }
   }
@@ -200,7 +201,7 @@ export const choosePurchase = (v: PurchaseView): Purchase | null => {
   const skip = blocked(v)
   const next = book[v.bookIndex]
   if (!next || skip.has(next) || v.items.length >= MAX_ITEMS) return null
-  if (v.gold < itemById(next).cost) return null
+  if (v.gold < lookupItem(next).cost) return null
   return { itemId: next, fromBook: true }
 }
 

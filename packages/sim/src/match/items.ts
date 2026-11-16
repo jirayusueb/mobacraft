@@ -26,7 +26,15 @@ export interface Item {
   readonly dropOnDeath?: boolean
   /** Seconds of Spell Immunity when a fight starts (60 s cooldown). */
   readonly spellImmunity?: number
+  /** Max mana (spec/09). */
+  readonly mana?: number
+  /** Mana regen per second (spec/09). */
+  readonly manaRegen?: number
+  /** Activated ability, fired by Hero Think's combat layer (spec/09 L3). */
+  readonly active?: { readonly kind: ItemActive; readonly cooldown: number }
 }
+
+export type ItemActive = "bkb" | "blink" | "force" | "eul"
 
 export const ITEMS: readonly Item[] = [
   { id: "boots", name: "Wanderer's Boots", cost: 400, speed: 0.35 },
@@ -35,17 +43,56 @@ export const ITEMS: readonly Item[] = [
   { id: "fang", name: "Vampire Fang", cost: 1300, damage: 14, lifesteal: 0.15 },
   { id: "plate", name: "Barrow Plate", cost: 1150, hp: 220, armor: 5 },
   { id: "heart", name: "Treant Heart", cost: 1500, hp: 420 },
-  { id: "tome", name: "Ember Tome", cost: 1200, power: 0.25 },
-  { id: "staff", name: "Voidglass Staff", cost: 1600, power: 0.35, hp: 120 },
-  { id: "charm", name: "Moon Charm", cost: 900, hp: 150, power: 0.12 },
-  { id: "aegis-cloak", name: "Warden's Cloak", cost: 1400, hp: 260, armor: 4, power: 0.1 },
+  { id: "tome", name: "Ember Tome", cost: 1200, power: 0.25, mana: 100 },
+  { id: "staff", name: "Voidglass Staff", cost: 1600, power: 0.35, hp: 120, mana: 200 },
+  { id: "charm", name: "Moon Charm", cost: 900, hp: 150, power: 0.12, mana: 150 },
+  {
+    id: "aegis-cloak",
+    name: "Warden's Cloak",
+    cost: 1400,
+    hp: 260,
+    armor: 4,
+    power: 0.1,
+    mana: 100,
+  },
   { id: "nullstone", name: "Nullstone Amulet", cost: 1300, hp: 150, magicResist: 0.2 },
   // Situational items bought by the rule engine (spec/07 §4b, builds.ts).
   { id: "pipe", name: "Pipe of Insight", cost: 1700, hp: 150, auraMagicResist: 0.25 },
-  { id: "blink", name: "Blink Dagger", cost: 1600, blink: true },
+  {
+    id: "blink",
+    name: "Blink Dagger",
+    cost: 1600,
+    blink: true,
+    active: { kind: "blink", cooldown: 14 },
+  },
   { id: "mkb", name: "Monkey King Bar", cost: 2200, damage: 30, trueStrike: true },
   { id: "rapier", name: "Divine Rapier", cost: 3600, damage: 110, dropOnDeath: true },
-  { id: "bkb", name: "Black King Bar", cost: 2400, damage: 10, hp: 100, spellImmunity: 6 },
+  {
+    id: "bkb",
+    name: "Black King Bar",
+    cost: 2400,
+    damage: 10,
+    hp: 100,
+    spellImmunity: 6,
+    active: { kind: "bkb", cooldown: 60 },
+  },
+  // Hero Think defensive actives (spec/09).
+  {
+    id: "force",
+    name: "Force Staff",
+    cost: 1500,
+    hp: 150,
+    manaRegen: 1,
+    active: { kind: "force", cooldown: 20 },
+  },
+  {
+    id: "eul",
+    name: "Eul's Scepter",
+    cost: 1650,
+    manaRegen: 1.5,
+    power: 0.1,
+    active: { kind: "eul", cooldown: 25 },
+  },
 ]
 
 export const itemById = (id: string): Item => {

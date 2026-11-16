@@ -1,8 +1,8 @@
 /**
  * Unit renderer: one InstancedMesh per kind (creatures + heroes), fed from
- * Population snapshots, plus health bars. Per-frame CPU = instance matrices plus a
- * vec4 of animation state per unit (stride phase, move weight, attack progress, seed),
- * derived from how far each unit actually moved and its attack counter.
+ * Population snapshots, plus health bars. Per-frame CPU = instance matrices, an
+ * animation-state vec4 and a skin-data row per unit (the PoseSolver's bone matrices);
+ * vertices are skinned in the material against the skin texture.
  */
 import type { MobaMap } from "@mobacraft/map"
 import { ALL_CREATURE_KINDS, HEROES, type Unit, type UnitKind } from "@mobacraft/sim"
@@ -16,9 +16,10 @@ import {
   Vector3,
 } from "three/webgpu"
 import { createBarLayer } from "./bars.ts"
-import { ANIM } from "./contract.ts"
-import { type AnimState, createAnimState, stepAnim } from "./motion.ts"
-import { creatureMaterial, creatureModel } from "./kit.ts"
+import { creatureMaterial as creatureMaterialFor, creatureModel as modelOf } from "./kit.ts"
+import { ANIM, type CreatureModel } from "./contract.ts"
+import { bindSkin, createSkin, writeSkin, type SkinTarget } from "./kit.ts"
+import { createAnimState, poseInput, stepAnim, type AnimState } from "./motion.ts"
 
 const capacity = (kind: UnitKind) =>
   kind === "roshan"
@@ -35,22 +36,21 @@ export const createUnitLayer = (map: MobaMap) => {
   const group = new Group()
   group.name = "units"
   const meshes = new Map<UnitKind, InstancedMesh>()
-  const heights = new Map<UnitKind, number>()
-  const strides = new Map<UnitKind, number>()
+  const skins = new Map<UnitKind, SkinTarget>()
   const anims = new Map<UnitKind, InstancedBufferAttribute>()
   const kinds: UnitKind[] = [...ALL_CREATURE_KINDS, ...HEROES.map((h) => h.id)]
   for (const kind of kinds) {
-    const model = creatureModel(kind)
-    heights.set(kind, model.height)
-    strides.set(kind, model.stride)
+    const model: CreatureModel = modelOf(kind)
     const n = capacity(kind)
+    const skin = createSkin(kind, n)
+    skins.set(kind, skin)
     // Shallow clone: shares the baked vertex buffers, adds this mesh's instanced state.
     const geometry = model.geometry.clone()
     const anim = new InstancedBufferAttribute(new Float32Array(n * 4).fill(1), 4)
     anim.setUsage(DynamicDrawUsage)
     geometry.setAttribute(ANIM, anim)
     anims.set(kind, anim)
-    const mesh = new InstancedMesh(geometry, creatureMaterial(), n)
+    const mesh = new InstancedMesh(geometry, creatureMaterialFor(kind, skin), n)
     mesh.count = 0
     mesh.castShadow = true
     mesh.receiveShadow = true
@@ -59,6 +59,8 @@ export const createUnitLayer = (map: MobaMap) => {
     mesh.name = `unit-${kind}`
     meshes.set(kind, mesh)
     group.add(mesh)
+    // Pre-fill every slot with the bind pose so fresh slots never read zeros.
+    for (let i = 0; i < n; i++) bindSkin(skin, i)
   }
   const bars = createBarLayer()
   group.add(bars.mesh)
@@ -70,8 +72,8 @@ export const createUnitLayer = (map: MobaMap) => {
   const scl = new Vector3(1, 1, 1)
   const counts = new Map<UnitKind, number>()
   const states = new Map<string, AnimState>()
+  let clock = 0
   let frame = 0
-  const barList: { x: number; y: number; z: number; hp: number; team: string; hero: boolean }[] = []
 
   const groundY = (u: Unit) => {
     const ground = map.heightAt(u.x, u.z)
@@ -83,33 +85,40 @@ export const createUnitLayer = (map: MobaMap) => {
 
   /** Write this frame's units into the instance buffers. `camQ` orients health bars. */
   const update = (units: readonly Unit[], camQ: Quaternion, showBars: boolean, dt: number) => {
+    clock += dt
     frame++
     counts.clear()
-    barList.length = 0
+    const barList: { x: number; y: number; z: number; hp: number; team: string; hero: boolean }[] =
+      []
     for (const u of units) {
-      if (u.alive === false) continue
-      const mesh = meshes.get(u.kind)
-      if (!mesh) continue
-      const i = counts.get(u.kind) ?? 0
-      if (i >= mesh.instanceMatrix.count) continue
-      const y = groundY(u)
       let st = states.get(u.id)
       if (!st) {
         st = createAnimState(u)
         states.set(u.id, st)
       }
-      stepAnim(st, u, dt, strides.get(u.kind) ?? 1)
+      stepAnim(st, u, dt, skins.get(u.kind)?.stride ?? 1)
       st.frame = frame
+      // Dying units keep animating (and keep their health bar hidden) until sunk.
+      if (u.alive === false && st.death >= 1) continue
+      const skin = skins.get(u.kind)
+      const mesh = meshes.get(u.kind)
+      if (!skin || !mesh) continue
+      const i = counts.get(u.kind) ?? 0
+      if (i >= mesh.instanceMatrix.count) continue
+      skin.solver.solve(poseInput(st, clock, skin.stride, skin.style), skin.scratch)
+      writeSkin(skin, i)
+      const y = groundY(u)
+      // Sinking units drop with the clip's tail.
       pos.set(u.x, y, u.z)
       q.setFromAxisAngle(up, st.heading)
       m.compose(pos, q, scl)
       mesh.setMatrixAt(i, m)
       anims.get(u.kind)?.setXYZW(i, st.phase, st.move, st.attack, st.seed)
       counts.set(u.kind, i + 1)
-      if (showBars && u.hp !== undefined && (u.hero || u.hp < 0.999)) {
+      if (showBars && u.alive !== false && u.hp !== undefined && (u.hero || u.hp < 0.999)) {
         barList.push({
           x: u.x,
-          y: y + (heights.get(u.kind) ?? 1) + 0.35,
+          y: y + (modelOf(u.kind).height ?? 1) + 0.35,
           z: u.z,
           hp: u.hp,
           team: u.team,
@@ -138,7 +147,7 @@ export const createUnitLayer = (map: MobaMap) => {
   return {
     group,
     update,
-    heightOf: (kind: UnitKind) => heights.get(kind) ?? 1,
+    heightOf: (kind: UnitKind) => modelOf(kind).height,
     dispose: () => {
       for (const mesh of meshes.values()) {
         mesh.geometry.deleteAttribute(ANIM)

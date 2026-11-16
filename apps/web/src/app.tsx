@@ -11,17 +11,16 @@ import { useMapView } from "./use-map-view.ts"
 // Composition root: the map is data, built once; the engine renders it.
 const map = generateMap(DEFAULT_SPEC)
 
-/** Little isometric island that bobs while the renderer warms up. */
+/** Little isometric island (spring | autumn) that bobs while the renderer warms up. */
 const IslandMark = () => (
-  <svg viewBox="0 0 64 64" className="size-16 drop-shadow-[0_8px_16px_rgba(0,0,0,0.5)]" aria-hidden>
-    <path d="M32 14 56 28 32 42 8 28Z" fill="#7cc35a" />
-    <path d="M8 28 32 42v8L8 36Z" fill="#6b4a2f" />
-    <path d="M56 28 32 42v8l24-14Z" fill="#4f3522" />
-    <path d="M32 21 44 28 32 35 20 28Z" fill="#c9b48a" opacity=".9" />
-    <path d="M18 24l3-7 3 7-3 1.5Z" fill="#3f8f3a" />
-    <path d="M42 22l3-7 3 7-3 1.5Z" fill="#c75b2a" />
-    <path d="M30 26h4v-6l-2-2-2 2Z" fill="#f2efe6" />
-  </svg>
+  <img
+    src={`${import.meta.env.BASE_URL}art/logo.webp`}
+    alt=""
+    aria-hidden
+    width={112}
+    height={112}
+    className="size-24 drop-shadow-[0_10px_18px_rgba(0,0,0,0.5)]"
+  />
 )
 
 const Loader = () => (

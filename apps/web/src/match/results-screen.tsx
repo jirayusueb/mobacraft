@@ -91,11 +91,28 @@ export const ResultsScreen = ({
   return (
     <div className="pointer-events-auto absolute inset-0 flex animate-in overflow-y-auto bg-black/55 p-6 backdrop-blur-[3px] duration-300 fade-in motion-reduce:animate-none max-md:p-2">
       <Panel className="m-auto w-full max-w-5xl p-5 max-md:p-3">
-        <div className="flex items-center gap-4">
-          <Crown className={cn("size-9", won ? "text-amber-300" : "text-white/30")} aria-hidden />
-          <div>
+        <div className="relative -mx-5 -mt-5 flex min-h-36 items-center gap-4 overflow-hidden rounded-t-[inherit] px-5 py-6 max-md:-mx-3 max-md:-mt-3 max-md:px-3">
+          <img
+            src={`${import.meta.env.BASE_URL}art/${won ? "victory" : "defeat"}.webp`}
+            alt=""
+            aria-hidden
+            decoding="async"
+            className="pointer-events-none absolute inset-0 size-full object-cover object-right animate-in duration-700 fade-in motion-reduce:animate-none"
+          />
+          <span
+            aria-hidden
+            className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,rgba(12,13,16,0.72)_0%,rgba(12,13,16,0.35)_45%,transparent_75%),linear-gradient(0deg,rgba(12,13,16,0.85)_0%,transparent_40%)]"
+          />
+          <Crown
+            className={cn(
+              "relative size-9 drop-shadow-[0_2px_6px_rgba(0,0,0,0.6)]",
+              won ? "text-amber-300" : "text-white/45",
+            )}
+            aria-hidden
+          />
+          <div className="relative drop-shadow-[0_1px_4px_rgba(0,0,0,0.7)]">
             <h1 className="text-3xl font-black tracking-tight">{won ? "Victory" : "Defeat"}</h1>
-            <p className="text-sm text-white/60">
+            <p className="text-sm text-white/75">
               {(final.winner === "blue" ? draft.blue : draft.red).name} won in{" "}
               {clockText(final.time)} · kills {final.kills[you]}–{final.kills[them]} · towers{" "}
               {final.towers[you]}–{final.towers[them]}

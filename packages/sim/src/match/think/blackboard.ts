@@ -84,4 +84,14 @@ export class Blackboard {
   clearLockOn(target: string): void {
     if (this.#lock?.target === target) this.#lock = null
   }
+
+  readonly #disabled = new Map<string, number>()
+  /** Record a disable OUR team landed (the only status source for chain-stuns). */
+  noteDisable(target: string, until: number): void {
+    this.#disabled.set(target, Math.max(this.#disabled.get(target) ?? 0, until))
+  }
+  /** Seconds left on our own latest disable of `target`. */
+  disableLeft(target: string, t: number): number {
+    return Math.max(0, (this.#disabled.get(target) ?? 0) - t)
+  }
 }

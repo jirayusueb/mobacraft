@@ -28,8 +28,7 @@ import {
   Quaternion,
   Vector3,
 } from "three/webgpu"
-import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
-import { type BoundPart, bindJoints, type Joint, type JointKind, transformPivots } from "./rig.ts"
+import { bakeModel, type BoundPart, type Joint, type JointKind, type SkeletonSpec } from "./rig.ts"
 
 type Vec = readonly [number, number, number]
 interface Place {
@@ -58,9 +57,9 @@ class Model {
   private readonly parts: BoundPart[] = []
   private readonly joints: Joint[] = []
 
-  /** Declare a joint the limb group `limb` pivots around. */
-  joint(kind: JointKind, limb: number, at: Vec): this {
-    this.joints.push({ kind, limb, at })
+  /** Declare a joint the limb group `limb` pivots around; child/grandchild extend the chain. */
+  joint(kind: JointKind, limb: number, at: Vec, child?: Vec, grandchild?: Vec): this {
+    this.joints.push({ kind, limb, at, child, grandchild })
     return this
   }
 
@@ -97,25 +96,8 @@ class Model {
     return this
   }
 
-  build(): BufferGeometry {
-    bindJoints(this.parts, this.joints)
-    const merged = mergeGeometries(
-      this.parts.map((p) => p.geo),
-      false,
-    )
-    if (!merged) throw new Error("kit-hero: merge failed")
-    for (const p of this.parts) p.geo.dispose()
-    merged.computeBoundingBox()
-    // Snap the lowest point (boots / hem) onto the ground plane.
-    const minY = merged.boundingBox?.min.y ?? 0
-    if (minY !== 0) {
-      merged.translate(0, -minY, 0)
-      transformPivots(merged, 1, -minY)
-    }
-    merged.computeVertexNormals()
-    merged.computeBoundingBox()
-    merged.computeBoundingSphere()
-    return merged
+  build(spec: SkeletonSpec = {}): BufferGeometry {
+    return bakeModel(this.parts, this.joints, spec)
   }
 
   private push(geo: BufferGeometry, hex: number, opts: PartOpts): this {
@@ -258,6 +240,7 @@ const armsOf = (m: Model, f: Frame, upper: number, fore: number, fist: number) =
 }
 
 const eyes = (m: Model, y: number, z: number, dx: number, hex: number, w = 0.05) => {
+  m.joint("head", 0, [0, y + 0.02, z - 0.08])
   for (const s of SIDES) m.add(new BoxGeometry(w, 0.036, 0.03), hex, { at: [s * dx, y, z] }, GLOW)
 }
 
@@ -279,6 +262,13 @@ const ringXZ = (c: Vec, r: number, n: number, fn: (p: Vec, a: number) => void, p
 
 /** Tattered cape hanging behind the shoulders. */
 const cape = (m: Model, top: number, bottom: number, w: number, z: number, hex: number) => {
+  m.joint(
+    "cape",
+    0,
+    [0, top - 0.02, z + 0.02],
+    [0, (top + bottom) / 2, z + 0.05],
+    [0, bottom, z + 0.06],
+  )
   const h = top - bottom
   m.add(new BoxGeometry(w, h, 0.045), hex, {
     at: [0, (top + bottom) / 2 + 0.03, z],
@@ -1172,6 +1162,7 @@ const beast = (p: Pal, id: string): BufferGeometry => {
     }
     eyes(m, 0.86, 0.5, 0.06, p.glow)
     // Moon-rune on the shoulder, tail
+    m.joint("tail", 0, [0, 0.5, -0.4], [0, 0.58, -0.6], [0, 0.48, -0.8])
     m.add(
       new OctahedronGeometry(0.06),
       p.glow,
@@ -1180,7 +1171,7 @@ const beast = (p: Pal, id: string): BufferGeometry => {
     )
     m.seg([0, 0.52, -0.42], [0, 0.6, -0.62], 0.08, 0.1, 5, p.bodyDark)
     m.spike([0, 0.6, -0.62], [0, 0.5, -0.82], 0.1, p.bodyDark, {}, 5)
-    return m.build()
+    return m.build({ quadruped: true, pelvisY: 0.5 })
   }
 
   // thornmaw (default beast): bulky briar bear, thorn-crusted back, mossy hide
@@ -1212,7 +1203,7 @@ const beast = (p: Pal, id: string): BufferGeometry => {
     m.spike([s * 0.08, 0.56, 0.62], [s * 0.1, 0.68, 0.7], 0.035, p.bone)
     m.spike([s * 0.1, 0.78, 0.46], [s * 0.17, 0.92, 0.38], 0.045, p.accent)
   }
-  return m.build()
+  return m.build({ quadruped: true, pelvisY: 0.55 })
 }
 
 // ── Shaman ──────────────────────────────────────────────────────────────────
