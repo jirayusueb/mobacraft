@@ -20,7 +20,21 @@ import { instanceColor } from "three/tsl"
 
 const MAX = 600
 
-export const createBarLayer = () => {
+/** One bar to draw this frame. `team` is "radiant" | "dire" | anything else (neutral). */
+export interface HealthBar {
+  readonly x: number
+  readonly y: number
+  readonly z: number
+  /** 0..1, clamped. */
+  readonly hp: number
+  readonly team: string
+  /** Heroes (and structures) get a larger bar. */
+  readonly hero: boolean
+}
+
+const teamCode = (team: string) => (team === "radiant" ? 0 : team === "dire" ? 0.5 : 1)
+
+const barMaterial = () => {
   const mat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: DoubleSide })
   const hp = instanceColor.r
   const team = instanceColor.g
@@ -38,38 +52,37 @@ export const createBarLayer = () => {
   const fill = mix(vec3(0.08, 0.08, 0.1), teamCol, filled)
   mat.colorNode = mix(vec3(0.02, 0.02, 0.03), fill, border)
   mat.opacityNode = float(0.92)
+  return mat
+}
 
-  const mesh = new InstancedMesh(new PlaneGeometry(1, 1), mat, MAX)
-  mesh.frustumCulled = false
-  mesh.count = 0
-  mesh.renderOrder = 10
-  mesh.name = "health-bars"
-  const m = new Matrix4()
-  const p = new Vector3()
-  const s = new Vector3()
-  const c = new Color()
-  mesh.setColorAt(0, c.setRGB(1, 0, 0))
+export class BarLayer {
+  readonly mesh: InstancedMesh
+  readonly #m = new Matrix4()
+  readonly #p = new Vector3()
+  readonly #s = new Vector3()
+  readonly #c = new Color()
+
+  constructor() {
+    const mesh = new InstancedMesh(new PlaneGeometry(1, 1), barMaterial(), MAX)
+    mesh.frustumCulled = false
+    mesh.count = 0
+    mesh.renderOrder = 10
+    mesh.name = "health-bars"
+    mesh.setColorAt(0, this.#c.setRGB(1, 0, 0))
+    this.mesh = mesh
+  }
 
   /** `q` = camera quaternion so bars face the camera. */
-  const update = (
-    bars: readonly { x: number; y: number; z: number; hp: number; team: string; hero: boolean }[],
-    q: Quaternion,
-  ) => {
+  update(bars: readonly HealthBar[], q: Quaternion): void {
+    const mesh = this.mesh
     let n = 0
     for (const b of bars) {
       if (n >= MAX) break
-      p.set(b.x, b.y, b.z)
-      s.set(b.hero ? 1.1 : 0.6, b.hero ? 0.13 : 0.08, 1)
-      m.compose(p, q, s)
-      mesh.setMatrixAt(n, m)
-      mesh.setColorAt(
-        n,
-        c.setRGB(
-          Math.max(0, Math.min(1, b.hp)),
-          b.team === "radiant" ? 0 : b.team === "dire" ? 0.5 : 1,
-          0,
-        ),
-      )
+      this.#p.set(b.x, b.y, b.z)
+      this.#s.set(b.hero ? 1.1 : 0.6, b.hero ? 0.13 : 0.08, 1)
+      this.#m.compose(this.#p, q, this.#s)
+      mesh.setMatrixAt(n, this.#m)
+      mesh.setColorAt(n, this.#c.setRGB(Math.max(0, Math.min(1, b.hp)), teamCode(b.team), 0))
       n++
     }
     mesh.count = n
@@ -78,5 +91,11 @@ export const createBarLayer = () => {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     }
   }
-  return { mesh, update, dispose: () => mesh.dispose() }
+
+  dispose(): void {
+    this.mesh.dispose()
+  }
 }
+
+/** @deprecated Prefer `new BarLayer()`. */
+export const createBarLayer = (): BarLayer => new BarLayer()

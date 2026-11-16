@@ -126,212 +126,248 @@ const makeBatch = (
   return { mesh, color: ic.array as Float32Array, param, cap, n: 0 }
 }
 
-export const createFxDraw = () => {
-  // --- gem: faceted orb, bright facets toward the camera ------------------------
-  const gems = makeBatch(
-    new IcosahedronGeometry(1, 0),
-    glowMaterial((c) => c.mul(float(0.45).add(abs(normalView.z).mul(0.75)))),
-    CAP.gem,
-    false,
-  )
+const UP = new Vector3(0, 1, 0)
 
-  // --- streak: hex prism y 0..1, wide head at y=1; fxParam = tail fade (0 flat, 1 strong) ---
-  const streakGeo = new CylinderGeometry(1, 0.3, 1, 6, 1, true).translate(0, 0.5, 0)
-  const streaks = makeBatch(
-    streakGeo,
-    glowMaterial((c) => {
-      const y = positionGeometry.y
-      const grad = mix(float(1), y.mul(y), fxParam())
-      return c.mul(grad).mul(float(0.65).add(abs(normalView.z).mul(0.5)))
-    }, true),
-    CAP.streak,
-    true,
-  )
+const disposeBatch = (b: Batch) => {
+  b.mesh.geometry.dispose()
+  ;(b.mesh.material as Material).dispose()
+  b.mesh.dispose()
+}
 
-  // --- decal: ground disc; fxParam = ring width (1 = filled, brighter rim) --------
-  const decals = makeBatch(
-    new CircleGeometry(1, 28).rotateX(-Math.PI / 2),
-    glowMaterial((c) => {
-      const w = fxParam()
-      const r = length(uv().sub(0.5)).mul(2)
-      const outer = smoothstep(float(0.99), float(0.9), r)
-      const inner = smoothstep(float(1).sub(w).sub(0.1), float(1).sub(w).add(0.04), r)
-      const body = mix(float(0.3), float(1), r.mul(r))
-      return c.mul(outer.mul(inner).mul(body))
-    }, true),
-    CAP.decal,
-    true,
-  )
+/** Batched instanced primitives for spell FX; call `begin`, draw, then `end` each frame. */
+export class FxDraw {
+  readonly meshes: readonly InstancedMesh[]
+  /** Camera basis (world), captured during render; used for billboard-ish placement. */
+  readonly camRight = new Vector3(1, 0, 0)
+  readonly camBack = new Vector3(0, 0, 1)
 
-  // --- crescent: sweep reveal with a bright leading head and outer edge ---------
-  const crescents = makeBatch(
-    crescentGeometry(),
-    glowMaterial((c) => {
-      const p = fxParam()
-      const u = uv().x
-      const v = uv().y
-      const head = smoothstep(p.sub(0.6), p, u).mul(step(u, p))
-      return c.mul(head).mul(mix(float(0.2), float(1.2), v.mul(v)))
-    }, true),
-    CAP.crescent,
-    true,
-  )
+  readonly #gems: Batch
+  readonly #streaks: Batch
+  readonly #decals: Batch
+  readonly #crescents: Batch
+  readonly #domes: Batch
+  readonly #smokes: Batch
+  readonly #batches: readonly Batch[]
 
-  // --- dome: flat-faceted hemisphere, fresnel rim + rising scan band -------------
-  const domeGeo = new SphereGeometry(1, 12, 5, 0, Math.PI * 2, 0, Math.PI / 2).toNonIndexed()
-  domeGeo.computeVertexNormals()
-  const domes = makeBatch(
-    domeGeo,
-    glowMaterial((c) => {
-      const rim = pow(float(1).sub(abs(normalView.z)), float(1.6))
-      const band = smoothstep(float(0.16), float(0), abs(positionGeometry.y.sub(fxParam())))
-      return c.mul(rim.mul(0.85).add(0.08).add(band.mul(0.6)))
-    }),
-    CAP.dome,
-    true,
-  )
+  // Scratch for instance transforms.
+  readonly #m = new Matrix4()
+  readonly #q = new Quaternion()
+  readonly #e = new Euler()
+  readonly #p = new Vector3()
+  readonly #s = new Vector3()
+  readonly #d = new Vector3()
 
-  // --- smoke: opaque lit puffs, they shrink away instead of fading ---------------
-  const smokeMat = new MeshLambertNodeMaterial({ flatShading: true })
-  const smokes = makeBatch(new IcosahedronGeometry(1, 0), smokeMat, CAP.smoke, false)
-  smokes.mesh.castShadow = false
-  smokes.mesh.receiveShadow = false
+  constructor() {
+    // --- gem: faceted orb, bright facets toward the camera ------------------------
+    this.#gems = makeBatch(
+      new IcosahedronGeometry(1, 0),
+      glowMaterial((c) => c.mul(float(0.45).add(abs(normalView.z).mul(0.75)))),
+      CAP.gem,
+      false,
+    )
 
-  const batches = [gems, streaks, decals, crescents, domes, smokes] as const
+    // --- streak: hex prism y 0..1, wide head at y=1; fxParam = tail fade (0 flat, 1 strong) ---
+    const streakGeo = new CylinderGeometry(1, 0.3, 1, 6, 1, true).translate(0, 0.5, 0)
+    this.#streaks = makeBatch(
+      streakGeo,
+      glowMaterial((c) => {
+        const y = positionGeometry.y
+        const grad = mix(float(1), y.mul(y), fxParam())
+        return c.mul(grad).mul(float(0.65).add(abs(normalView.z).mul(0.5)))
+      }, true),
+      CAP.streak,
+      true,
+    )
 
-  // Camera basis (world), captured during render; used for billboard-ish placement.
-  const camRight = new Vector3(1, 0, 0)
-  const camBack = new Vector3(0, 0, 1)
-  const track = (_r: unknown, _s: unknown, camera: Camera) => {
-    camRight.set(1, 0, 0).applyQuaternion(camera.quaternion)
-    camBack.set(0, 0, 1).applyQuaternion(camera.quaternion)
+    // --- decal: ground disc; fxParam = ring width (1 = filled, brighter rim) --------
+    this.#decals = makeBatch(
+      new CircleGeometry(1, 28).rotateX(-Math.PI / 2),
+      glowMaterial((c) => {
+        const w = fxParam()
+        const r = length(uv().sub(0.5)).mul(2)
+        const outer = smoothstep(float(0.99), float(0.9), r)
+        const inner = smoothstep(float(1).sub(w).sub(0.1), float(1).sub(w).add(0.04), r)
+        const body = mix(float(0.3), float(1), r.mul(r))
+        return c.mul(outer.mul(inner).mul(body))
+      }, true),
+      CAP.decal,
+      true,
+    )
+
+    // --- crescent: sweep reveal with a bright leading head and outer edge ---------
+    this.#crescents = makeBatch(
+      crescentGeometry(),
+      glowMaterial((c) => {
+        const p = fxParam()
+        const u = uv().x
+        const v = uv().y
+        const head = smoothstep(p.sub(0.6), p, u).mul(step(u, p))
+        return c.mul(head).mul(mix(float(0.2), float(1.2), v.mul(v)))
+      }, true),
+      CAP.crescent,
+      true,
+    )
+
+    // --- dome: flat-faceted hemisphere, fresnel rim + rising scan band -------------
+    const domeGeo = new SphereGeometry(1, 12, 5, 0, Math.PI * 2, 0, Math.PI / 2).toNonIndexed()
+    domeGeo.computeVertexNormals()
+    this.#domes = makeBatch(
+      domeGeo,
+      glowMaterial((c) => {
+        const rim = pow(float(1).sub(abs(normalView.z)), float(1.6))
+        const band = smoothstep(float(0.16), float(0), abs(positionGeometry.y.sub(fxParam())))
+        return c.mul(rim.mul(0.85).add(0.08).add(band.mul(0.6)))
+      }),
+      CAP.dome,
+      true,
+    )
+
+    // --- smoke: opaque lit puffs, they shrink away instead of fading ---------------
+    const smokeMat = new MeshLambertNodeMaterial({ flatShading: true })
+    this.#smokes = makeBatch(new IcosahedronGeometry(1, 0), smokeMat, CAP.smoke, false)
+    this.#smokes.mesh.castShadow = false
+    this.#smokes.mesh.receiveShadow = false
+
+    this.#batches = [
+      this.#gems,
+      this.#streaks,
+      this.#decals,
+      this.#crescents,
+      this.#domes,
+      this.#smokes,
+    ]
+    this.meshes = this.#batches.map((b) => b.mesh)
+
+    const track = (_r: unknown, _s: unknown, camera: Camera) => {
+      this.camRight.set(1, 0, 0).applyQuaternion(camera.quaternion)
+      this.camBack.set(0, 0, 1).applyQuaternion(camera.quaternion)
+    }
+    for (const b of this.#batches) b.mesh.onBeforeRender = track
   }
-  for (const b of batches) b.mesh.onBeforeRender = track
 
-  const m = new Matrix4()
-  const q = new Quaternion()
-  const e = new Euler()
-  const p = new Vector3()
-  const s = new Vector3()
-  const d = new Vector3()
-  const UP = new Vector3(0, 1, 0)
+  begin(): void {
+    for (const b of this.#batches) b.n = 0
+  }
 
-  const put = (b: Batch, r: number, g: number, bl: number, k: number, param: number) => {
+  end(): void {
+    for (const b of this.#batches) {
+      b.mesh.count = b.n
+      if (b.n === 0) continue
+      b.mesh.instanceMatrix.needsUpdate = true
+      b.mesh.instanceColor!.needsUpdate = true
+      if (b.param) b.param.needsUpdate = true
+    }
+  }
+
+  /** Faceted gem; `squash` scales y; `spin` is a tumble angle. */
+  gem(
+    x: number,
+    y: number,
+    z: number,
+    size: number,
+    spin: number,
+    c: Color,
+    k: number,
+    squash = 1,
+  ): void {
+    const b = this.#gems
+    if (b.n >= b.cap || size <= 0.001 || k <= 0.002) return
+    this.#p.set(x, y, z)
+    this.#q.setFromEuler(this.#e.set(spin * 0.7, spin, spin * 0.3))
+    this.#s.set(size, size * squash, size)
+    this.#put(b, c, k, 0)
+  }
+
+  /** Prism from tail (a) to head (b); `fade` 0 = uniform, 1 = bright head / dark tail. */
+  streak(
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+    width: number,
+    c: Color,
+    k: number,
+    fade: number,
+  ): void {
+    const b = this.#streaks
+    if (b.n >= b.cap || width <= 0.001 || k <= 0.002) return
+    const d = this.#d.set(bx - ax, by - ay, bz - az)
+    const len = d.length()
+    if (len < 1e-4) return
+    this.#q.setFromUnitVectors(UP, d.divideScalar(len))
+    this.#p.set(ax, ay, az)
+    this.#s.set(width, len, width)
+    this.#put(b, c, k, fade)
+  }
+
+  /** Ground disc / ring; `ring` = band width as a fraction of radius (1 = filled). */
+  decal(x: number, y: number, z: number, radius: number, ring: number, c: Color, k: number): void {
+    const b = this.#decals
+    if (b.n >= b.cap || radius <= 0.001 || k <= 0.002) return
+    this.#p.set(x, y, z)
+    this.#q.identity()
+    this.#s.set(radius, 1, radius)
+    this.#put(b, c, k, ring)
+  }
+
+  /** Crescent arc; yaw faces its centre, roll tilts it; `sweep` 0..1.6 reveals it. */
+  crescent(
+    x: number,
+    y: number,
+    z: number,
+    radius: number,
+    yaw: number,
+    roll: number,
+    sweep: number,
+    c: Color,
+    k: number,
+  ): void {
+    const b = this.#crescents
+    if (b.n >= b.cap || k <= 0.002) return
+    this.#p.set(x, y, z)
+    this.#q.setFromEuler(this.#e.set(0, yaw, roll, "YXZ"))
+    this.#e.order = "XYZ"
+    this.#s.set(radius, 1, radius)
+    this.#put(b, c, k, sweep)
+  }
+
+  /** Hemisphere shield; `band` = scan-band height 0..1. */
+  dome(x: number, y: number, z: number, radius: number, band: number, c: Color, k: number): void {
+    const b = this.#domes
+    if (b.n >= b.cap || radius <= 0.001 || k <= 0.002) return
+    this.#p.set(x, y, z)
+    this.#q.identity()
+    this.#s.set(radius, radius * 0.92, radius)
+    this.#put(b, c, k, band)
+  }
+
+  /** Opaque smoke puff (shrinks to vanish). */
+  smoke(x: number, y: number, z: number, size: number, spin: number, c: Color): void {
+    const b = this.#smokes
+    if (b.n >= b.cap || size <= 0.005) return
+    this.#p.set(x, y, z)
+    this.#q.setFromEuler(this.#e.set(spin, spin * 1.3, 0))
+    this.#s.set(size, size * 0.85, size)
+    this.#put(b, c, 1, 0)
+  }
+
+  dispose(): void {
+    for (const b of this.#batches) disposeBatch(b)
+  }
+
+  /** Append one instance with the current scratch transform, colour × `k`, and param. */
+  #put(b: Batch, c: Color, k: number, param: number): void {
     const i = b.n++
-    b.mesh.setMatrixAt(i, m.compose(p, q, s))
+    b.mesh.setMatrixAt(i, this.#m.compose(this.#p, this.#q, this.#s))
     const o = i * 3
-    b.color[o] = r * k
-    b.color[o + 1] = g * k
-    b.color[o + 2] = bl * k
+    b.color[o] = c.r * k
+    b.color[o + 1] = c.g * k
+    b.color[o + 2] = c.b * k
     if (b.param) b.param.array[i] = param
-  }
-
-  return {
-    meshes: batches.map((b) => b.mesh),
-    camRight,
-    camBack,
-    begin: () => {
-      for (const b of batches) b.n = 0
-    },
-    end: () => {
-      for (const b of batches) {
-        b.mesh.count = b.n
-        if (b.n === 0) continue
-        b.mesh.instanceMatrix.needsUpdate = true
-        b.mesh.instanceColor!.needsUpdate = true
-        if (b.param) b.param.needsUpdate = true
-      }
-    },
-    /** Faceted gem; `squash` scales y; `spin` is a tumble angle. */
-    gem: (
-      x: number,
-      y: number,
-      z: number,
-      size: number,
-      spin: number,
-      c: Color,
-      k: number,
-      squash = 1,
-    ) => {
-      if (gems.n >= gems.cap || size <= 0.001 || k <= 0.002) return
-      p.set(x, y, z)
-      q.setFromEuler(e.set(spin * 0.7, spin, spin * 0.3))
-      s.set(size, size * squash, size)
-      put(gems, c.r, c.g, c.b, k, 0)
-    },
-    /** Prism from tail (a) to head (b); `fade` 0 = uniform, 1 = bright head / dark tail. */
-    streak: (
-      ax: number,
-      ay: number,
-      az: number,
-      bx: number,
-      by: number,
-      bz: number,
-      width: number,
-      c: Color,
-      k: number,
-      fade: number,
-    ) => {
-      if (streaks.n >= streaks.cap || width <= 0.001 || k <= 0.002) return
-      d.set(bx - ax, by - ay, bz - az)
-      const len = d.length()
-      if (len < 1e-4) return
-      q.setFromUnitVectors(UP, d.divideScalar(len))
-      p.set(ax, ay, az)
-      s.set(width, len, width)
-      put(streaks, c.r, c.g, c.b, k, fade)
-    },
-    /** Ground disc / ring; `ring` = band width as a fraction of radius (1 = filled). */
-    decal: (x: number, y: number, z: number, radius: number, ring: number, c: Color, k: number) => {
-      if (decals.n >= decals.cap || radius <= 0.001 || k <= 0.002) return
-      p.set(x, y, z)
-      q.identity()
-      s.set(radius, 1, radius)
-      put(decals, c.r, c.g, c.b, k, ring)
-    },
-    /** Crescent arc; yaw faces its centre, roll tilts it; `sweep` 0..1.6 reveals it. */
-    crescent: (
-      x: number,
-      y: number,
-      z: number,
-      radius: number,
-      yaw: number,
-      roll: number,
-      sweep: number,
-      c: Color,
-      k: number,
-    ) => {
-      if (crescents.n >= crescents.cap || k <= 0.002) return
-      p.set(x, y, z)
-      q.setFromEuler(e.set(0, yaw, roll, "YXZ"))
-      e.order = "XYZ"
-      s.set(radius, 1, radius)
-      put(crescents, c.r, c.g, c.b, k, sweep)
-    },
-    /** Hemisphere shield; `band` = scan-band height 0..1. */
-    dome: (x: number, y: number, z: number, radius: number, band: number, c: Color, k: number) => {
-      if (domes.n >= domes.cap || radius <= 0.001 || k <= 0.002) return
-      p.set(x, y, z)
-      q.identity()
-      s.set(radius, radius * 0.92, radius)
-      put(domes, c.r, c.g, c.b, k, band)
-    },
-    /** Opaque smoke puff (shrinks to vanish). */
-    smoke: (x: number, y: number, z: number, size: number, spin: number, c: Color) => {
-      if (smokes.n >= smokes.cap || size <= 0.005) return
-      p.set(x, y, z)
-      q.setFromEuler(e.set(spin, spin * 1.3, 0))
-      s.set(size, size * 0.85, size)
-      put(smokes, c.r, c.g, c.b, 1, 0)
-    },
-    dispose: () => {
-      for (const b of batches) {
-        b.mesh.geometry.dispose()
-        ;(b.mesh.material as Material).dispose()
-        b.mesh.dispose()
-      }
-    },
   }
 }
 
-export type FxDraw = ReturnType<typeof createFxDraw>
+/** @deprecated Prefer `new FxDraw()`. */
+export const createFxDraw = (): FxDraw => new FxDraw()

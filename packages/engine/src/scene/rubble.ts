@@ -20,20 +20,11 @@ import {
   Object3D,
   type Quaternion,
 } from "three/webgpu"
-import { createBarLayer } from "../creatures/bars.ts"
+import { BarLayer, type HealthBar } from "../creatures/bars.ts"
 
 const ROCKS_PER = 9
 
 type Structure = MobaMap["structures"][number]
-
-interface BarEntry {
-  x: number
-  y: number
-  z: number
-  hp: number
-  team: string
-  hero: boolean
-}
 
 const rubbleSize = (s: Structure) => (s.kind === "ancient" ? 2.2 : s.kind === "tower" ? 1 : 1.3)
 
@@ -47,10 +38,10 @@ export class RubbleLayer {
   readonly #index: ReadonlyMap<string, number>
   readonly #rocks: InstancedMesh
   readonly #scorch: InstancedMesh
-  readonly #bars = createBarLayer()
+  readonly #bars = new BarLayer()
   readonly #dummy = new Object3D()
   readonly #tint = new Color()
-  readonly #barList: BarEntry[] = []
+  readonly #barList: HealthBar[] = []
   #lastKey = ""
 
   constructor(map: MobaMap) {
