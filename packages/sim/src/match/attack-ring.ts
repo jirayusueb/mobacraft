@@ -72,6 +72,12 @@ export class AttackRings {
   /** attacker id → { target, slot } */
   readonly #held = new Map<string, { target: string; slot: Slot }>()
   readonly #frozenUntil = new Map<string, number>()
+  /** Orbit direction (+1 ccw / −1 cw) fixed at reservation, so approach never flip-flops. */
+  readonly #orbit = new Map<string, number>()
+
+  orbitSign(attackerId: string): number {
+    return this.#orbit.get(attackerId) ?? 1
+  }
 
   /** World offset of a slot relative to its target. */
   offset(targetId: string, slot: Slot): Pos {
@@ -148,6 +154,8 @@ export class AttackRings {
         const slot: Slot = { ring: which, index: best }
         ring.holders[this.#flat(ring, slot)] = attackerId
         this.#held.set(attackerId, { target: targetId, slot })
+        const d = wrap(angleOf(which, best, geo) - toward)
+        this.#orbit.set(attackerId, d < 0 ? -1 : 1)
         return slot
       }
     }
@@ -219,6 +227,7 @@ export class AttackRings {
       if (ring.holders[k] === attackerId) ring.holders[k] = undefined
     }
     this.#held.delete(attackerId)
+    this.#orbit.delete(attackerId)
   }
 
   /** Drop a target's rings (it died); every holder loses its slot. */

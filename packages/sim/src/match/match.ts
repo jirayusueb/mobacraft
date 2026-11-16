@@ -59,9 +59,9 @@ import {
   swingTiming,
   tickSwing,
 } from "./attack-phase.ts"
-import { AttackRings, reach } from "./attack-ring.ts"
+import { AttackRings, reach as hullReach } from "./attack-ring.ts"
 import { type CrowdMode, type CrowdWorld, type Mover, crowdStep } from "./crowd.ts"
-import { isMicro, microWaypoint, planEngage, usesRings } from "./engage.ts"
+import { REACH_EPS, isMicro, microWaypoint, planEngage } from "./engage.ts"
 import { hasTag } from "./archetypes.ts"
 import { createRandom } from "./random.ts"
 import {
@@ -251,6 +251,10 @@ interface Body {
   mover?: Mover
   /** Micro-steering hysteresis flag. */
   micro?: boolean
+  /** Seconds spent wanting to move but not moving (forces an A* repath). */
+  stuckT?: number
+  /** Earliest clock time for the next stuck repath (backoff). */
+  repathAt?: number
   // --- locomotion fields (spec/11; consumers: knockback free pathing, crowd layer) ---
   /** Hull radius in tiles (hero 0.375, creep 0.25). */
   radius?: number
@@ -728,7 +732,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const casts = new Map<string, number>()
   /** Crowd radii (spec/09 §2), keyed on unit class; structures are static. */
   const crowdRadius = (b: Body) =>
-    b.type === "roshan" ? 0.9 : b.kind.toString().includes("siege") ? 0.45 : b.type === "hero" ? 0.4 : 0.35
+    b.type === "roshan"
+      ? 0.9
+      : b.kind.toString().includes("siege")
+        ? 0.45
+        : b.type === "hero"
+          ? 0.4
+          : 0.35
   const newMover = (b: Body): Mover => {
     const m: Mover = {
       id: b.id,
@@ -1583,7 +1593,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     },
     walkable: (x, z, m) => {
       const b = ownerOf.get(m)
-      return (b?.freePath ?? 0) > 0 || !nav.blocked({ x, z })
+      // Free pathing, or already wedged inside forest (escape any way out).
+      return (b?.freePath ?? 0) > 0 || !nav.blocked({ x, z }) || nav.blocked(m)
     },
     canYield: (m, dx, dz) => {
       const b = ownerOf.get(m)
@@ -1611,9 +1622,26 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (plan.inReach) {
       if (b.mover) b.mover.mode = "engaged"
       attack(b, t)
+      // Settle into the reserved slot between swings (frees the ring edge for others).
+      if (
+        plan.drift &&
+        b.mover &&
+        b.swing &&
+        !isLocked(b.swing) &&
+        b.st.root <= 0 &&
+        b.st.stun <= 0
+      ) {
+        cancelBackswing(b.swing)
+        const d = dist(b, plan.drift)
+        const v = Math.min(b.speed * statMul(b, "speed"), d / dt)
+        b.mover.pvx = ((plan.drift.x - b.x) / d) * v
+        b.mover.pvz = ((plan.drift.z - b.z) / d) * v
+        b.mover.maxSpeed = Math.max(b.mover.maxSpeed, v)
+      }
       return
     }
-    if (plan.slotted || dist(b, plan.goal) < 6 || b.type !== "hero") stepToward(b, plan.goal, plan.stopAt, dt)
+    if (plan.slotted || dist(b, plan.goal) < 6 || b.type !== "hero")
+      stepToward(b, plan.goal, plan.stopAt, dt)
     else travel(b, plan.goal, plan.stopAt, dt)
   }
 
@@ -1642,7 +1670,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     b.micro = isMicro(b.micro ?? false, gd)
     if (b.micro && gd > stopAt + 0.05) {
       const blockers: Body[] = []
-      for (const o of near(b, 2)) if (o !== b && o.alive && dist(o, b) < 2) blockers.push(o)
+      for (const o of near(b, 2)) {
+        if (o === b || !o.alive || dist(o, b) >= 2) continue
+        // Idle teammates are not obstacles: walk at them and they yield (spec/09 §6).
+        const idle =
+          o.team === b.team && o.mover && !o.target && Math.hypot(o.mover.vx, o.mover.vz) < 0.05
+        if (!idle) blockers.push(o)
+      }
       const r = b.mover.radius
       const w = microWaypoint(
         b,
@@ -1654,20 +1688,20 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if (!w) return
       wp = w
     }
-    steer(b, wp, stopAt, spd, dt)
+    // Stop distance is measured to the real goal, not the steering waypoint.
+    steer(b, wp, gd - stopAt, spd, dt)
   }
 
   /**
    * Preferred velocity toward `wp` (spec/09 §1): the only movement output of decision
    * code. Turn rate still gates acceleration (spec/11); crowdStep integrates.
    */
-  const steer = (b: Body, wp: Vec2, stopAt: number, spd: number, dt: number) => {
+  const steer = (b: Body, wp: Vec2, left: number, spd: number, dt: number) => {
     const m = b.mover!
     const dx = wp.x - b.x
     const dz = wp.z - b.z
     const d = Math.hypot(dx, dz)
-    const left = d - stopAt
-    if (left <= 0.01) return
+    if (left <= 0.01 || d < 1e-6) return
     const desired = Math.atan2(dx, dz)
     b.heading = turnToward(b.heading, desired, b.turnRate ?? TURN.mid, dt)
     if (Math.abs(angDiff(desired, b.heading)) >= GATE * 4) return // turn in place first
@@ -2346,9 +2380,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   /** Hull-adjusted reach of `b` against `t` (spec/09 §3). */
   const reachOf = (b: Body, t: Body) =>
-    reach(b.range, t.structure ? (t.type === "tower" ? 0.8 : 1.2) : (t.mover?.radius ?? 0.4))
+    hullReach(b.range, t.structure ? (t.type === "tower" ? 0.8 : 1.2) : (t.mover?.radius ?? 0.4)) +
+    REACH_EPS
   const swingClass = (b: Body) =>
-    b.type === "hero" || b.type === "creep" || b.type === "neutral" || b.type === "roshan" || b.type === "tower"
+    b.type === "hero" ||
+    b.type === "creep" ||
+    b.type === "neutral" ||
+    b.type === "roshan" ||
+    b.type === "tower"
       ? b.type
       : "other"
 
@@ -2815,6 +2854,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   /** Crowd pass (spec/09 §1–§2, §6): the only integrator of mover positions. */
   const movers: Mover[] = []
+  const touching = (b: Body) => {
+    const r = b.mover!.radius + 0.6
+    for (const o of near(b, r + 1))
+      if (o !== b && o.alive && dist(o, b) < r + (o.mover?.radius ?? 0.8)) return true
+    return false
+  }
   const crowdTick = (dt: number) => {
     movers.length = 0
     for (const b of bodies) {
@@ -2835,9 +2880,23 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       ownerOf.set(m, b)
       movers.push(m)
     }
+    const wanted = movers.map((m) => Math.hypot(m.pvx, m.pvz))
     crowdStep(movers, dt, crowdWorld)
-    for (const m of movers) {
+    for (let i = 0; i < movers.length; i++) {
+      const m = movers[i]!
       const b = ownerOf.get(m)!
+      // Wedged on terrain (a straight path segment clipping forest): repath from here.
+      const moved = Math.hypot(m.x - b.x, m.z - b.z)
+      // Crowd-blocked bodies wait for ORCA/yield; only terrain-wedged ones repath.
+      if (b.path && wanted[i]! > 0.5 && moved < wanted[i]! * dt * 0.15 && !touching(b)) {
+        b.stuckT = (b.stuckT ?? 0) + dt
+        // First repath after 0.5 s; while still wedged, retry at most every 2 s.
+        if (b.stuckT >= 0.5 && clock >= (b.repathAt ?? 0)) {
+          b.repathAt = clock + 2
+          b.pathKey = undefined
+          b.stuckT = 0
+        }
+      } else b.stuckT = 0
       b.x = m.x
       b.z = m.z
       b.velMag = Math.hypot(m.vx, m.vz)
@@ -3380,6 +3439,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   const match = {
     advance,
+    /** Attack-phase counters (spec/09 acceptance): landed vs cancelled swings. */
+    swingStats: () => ({ ...swingStats }),
     time: () => clock,
     units,
     /** Destroy a tree at world (x, z); opens vision (spec/08 §4c). */

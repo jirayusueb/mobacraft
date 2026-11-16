@@ -12,7 +12,7 @@ export interface V2 {
 }
 
 /** ORCA time horizon (s): how far ahead agents promise not to collide. */
-export const ORCA_TAU = 1
+export const ORCA_TAU = 0.4
 /** Neighbour radius (tiles) and cap for ORCA and steering queries. */
 export const NEIGHBOR_RADIUS = 3
 export const MAX_NEIGHBORS = 10
