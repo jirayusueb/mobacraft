@@ -100,7 +100,8 @@ describe("match", () => {
     const b = createMatch(map, autoDraft(), { seed: 3 }).runToEnd()
     expect(a.time).toBe(b.time)
     expect(a.heroes).toEqual(b.heroes)
-  })
+    // Two full matches; CI runners need more than the 5 s default.
+  }, 60_000)
 
   test("no structural side bias: same comps swapped across sides split wins", () => {
     // Swapping the two compositions between sides must flip most outcomes.
