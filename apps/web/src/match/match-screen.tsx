@@ -64,6 +64,9 @@ export const MatchScreen = ({
   const [tacticsOpen, setTacticsOpen] = useState(false)
   const announcer = useRef(new AnnouncerTracker())
 
+  /** Coach-perspective fog bytes (spec/08 §5), read by the 20 Hz fog layer. */
+  const fogOfYou = useCallback(() => match.fog(you), [match, you])
+
   /** Re-read everything the HUD shows from the sim. */
   const refresh = useCallback(() => {
     setSnap(match.snapshot())
@@ -178,7 +181,14 @@ export const MatchScreen = ({
       <CommsLog snap={snap} you={you} />
 
       <div className="absolute bottom-5 left-4 max-md:hidden">
-        <WardMap map={map} snap={snap} units={units} you={you} onFocus={view.focus} />
+        <WardMap
+          map={map}
+          snap={snap}
+          units={units}
+          you={you}
+          fog={fogOfYou}
+          onFocus={view.focus}
+        />
       </div>
 
       {economyOpen ? (

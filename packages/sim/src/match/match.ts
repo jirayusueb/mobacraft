@@ -2657,6 +2657,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     units,
     /** Destroy a tree at world (x, z); opens vision (spec/08 §4c). */
     cutTree,
+    /** Fog render bytes for one side (spec/08 §5) — cheap 20 Hz path, no full snapshot. */
+    fog: (side: DraftSide) => fogSnapshot(visionGrid[side], staticFog),
     /** Read-only AI knowledge per side (spec/08 §3) — tests and debug overlays. */
     knowledgeOf: (side: DraftSide): TeamKnowledge => knowledge[side],
     fx: () => {
