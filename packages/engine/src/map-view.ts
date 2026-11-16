@@ -17,7 +17,7 @@ import type { MobaMap } from "@mobacraft/map"
 import { Context, Effect, Layer, Stream, SubscriptionRef } from "effect"
 import { WebGPURenderer } from "three/webgpu"
 import { CREATURE_NAME, type Population } from "@mobacraft/sim"
-import { createRig } from "./camera-rig.ts"
+import { CameraRig } from "./camera-rig.ts"
 import { RendererInitError } from "./errors.ts"
 import { createWorld, type Picked } from "./world.ts"
 
@@ -118,7 +118,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     Effect.sync(() => createWorld(renderer, map)),
     (w) => Effect.sync(() => w.dispose()),
   )
-  const rig = createRig({
+  const rig = new CameraRig({
     size: map.size,
     home: { x: map.size / 2, z: map.size / 2, zoom: 0.62 },
   })
