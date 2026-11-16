@@ -383,7 +383,8 @@ export const priorityOf = (m: Mover): number =>
 export interface CrowdWorld<M extends Mover> {
   /** Fill `out` with candidate neighbours of `m` within `r` (may include m). */
   neighbors(m: M, r: number, out: M[]): void
-  walkable(x: number, z: number): boolean
+  /** Is (x, z) open ground for mover `m`? (free-pathing movers may ignore forest) */
+  walkable(x: number, z: number, m: M): boolean
   /** May `b` take a yield step of (dx, dz)? (in-range guard, stun, structures…) */
   canYield(b: M, dx: number, dz: number): boolean
 }
@@ -430,7 +431,7 @@ export const crowdStep = <M extends Mover>(
     const v = hit.maxSpeed * YIELD_SPEED
     const sx = dir.x * v * YIELD_TIME
     const sz = dir.z * v * YIELD_TIME
-    if (!world.walkable(hit.x + sx, hit.z + sz) || !world.canYield(hit, sx, sz)) continue
+    if (!world.walkable(hit.x + sx, hit.z + sz, hit) || !world.canYield(hit, sx, sz)) continue
     hit.yieldT = YIELD_TIME
     hit.yieldCd = YIELD_COOLDOWN
     hit.yx = dir.x * v
@@ -494,11 +495,11 @@ export const crowdStep = <M extends Mover>(
     }
     let nx = m.x + vx * dt
     let nz = m.z + vz * dt
-    if (!world.walkable(nx, nz)) {
-      if (world.walkable(nx, m.z)) {
+    if (!world.walkable(nx, nz, m)) {
+      if (world.walkable(nx, m.z, m)) {
         nz = m.z
         vz = 0
-      } else if (world.walkable(m.x, nz)) {
+      } else if (world.walkable(m.x, nz, m)) {
         nx = m.x
         vx = 0
       } else {

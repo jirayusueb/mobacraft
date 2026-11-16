@@ -26,17 +26,42 @@ import {
   MAIN_SLOTS,
   type HeroInventory,
   addItem,
+  allItems,
   countItems,
   effectiveItems,
   emptyInventory,
   lookupItem,
   netWorthItems,
   promoteFirstBackpack,
+  removeItem,
   rollNeutralDrop,
 } from "./inventory.ts"
-import { itemById } from "./items.ts"
+import { itemById, missingComponents, recipeCost } from "./items.ts"
 import { matchupDamageMul, synergyPowerMul, teamSynergy } from "./matrix.ts"
-import { DynamicNav, FREE_PATH_T, HULL, TURN, moveBody } from "./locomotion.ts"
+import {
+  DynamicNav,
+  FREE_PATH_T,
+  GATE,
+  HULL,
+  MAX_SPEED,
+  TURN,
+  angDiff,
+  moveBody,
+  turnToward,
+} from "./locomotion.ts"
+import {
+  type Swing,
+  CAST_LOCK,
+  beginSwing,
+  cancelBackswing,
+  isLocked,
+  newSwing,
+  swingTiming,
+  tickSwing,
+} from "./attack-phase.ts"
+import { AttackRings, reach } from "./attack-ring.ts"
+import { type CrowdMode, type CrowdWorld, type Mover, crowdStep } from "./crowd.ts"
+import { isMicro, microWaypoint, planEngage, usesRings } from "./engage.ts"
 import { hasTag } from "./archetypes.ts"
 import { createRandom } from "./random.ts"
 import {
@@ -219,6 +244,13 @@ interface Body {
   contributors?: Map<string, number>
   target?: Body
   hero?: HeroState
+  // --- crowd & combat (spec/09 crowd-combat) ---
+  /** Three-phase attack state. */
+  swing?: Swing
+  /** Body as the crowd layer sees it (preferred velocity in, safe velocity out). */
+  mover?: Mover
+  /** Micro-steering hysteresis flag. */
+  micro?: boolean
   // --- locomotion fields (spec/11; consumers: knockback free pathing, crowd layer) ---
   /** Hull radius in tiles (hero 0.375, creep 0.25). */
   radius?: number
@@ -694,6 +726,29 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const lockCasts = { total: 0, onLock: 0 }
   /** Ability usage counters (balance reports / tests). */
   const casts = new Map<string, number>()
+  /** Crowd radii (spec/09 §2), keyed on unit class; structures are static. */
+  const crowdRadius = (b: Body) =>
+    b.type === "roshan" ? 0.9 : b.kind.toString().includes("siege") ? 0.45 : b.type === "hero" ? 0.4 : 0.35
+  const newMover = (b: Body): Mover => {
+    const m: Mover = {
+      id: b.id,
+      team: b.team,
+      x: b.x,
+      z: b.z,
+      vx: 0,
+      vz: 0,
+      pvx: 0,
+      pvz: 0,
+      radius: crowdRadius(b),
+      maxSpeed: b.speed,
+      mode: "free",
+      yieldT: 0,
+      yieldCd: 0,
+      yx: 0,
+      yz: 0,
+    }
+    return m
+  }
   const add = (b: Omit<Body, "st" | "alive" | "cooldown"> & Partial<Pick<Body, "cooldown">>) => {
     const full: Body = { cooldown: 0, alive: true, st: emptyStatus(), ...b }
     // Locomotion defaults (spec/11).
@@ -701,6 +756,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       full.type === "hero" ? HULL.hero : full.type === "creep" ? HULL.creep : HULL.neutral
     full.turnRate ??= full.type === "hero" ? TURN.fast : TURN.mid
     full.velMag ??= 0
+    full.swing = newSwing()
+    if (full.speed > 0) full.mover = newMover(full)
     bodies.push(full)
     return full
   }
@@ -1064,6 +1121,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
     target.alive = false
     target.hp = 0
+    rings.dropTarget(target.id)
+    rings.release(target.id)
+    if (target.swing) target.swing = newSwing()
     fx({ t: clock, kind: "death", at: { x: target.x, z: target.z }, team: target.team })
     const killer = src?.hero ? src : target.lastHit?.hero ? target.lastHit : undefined
 
@@ -1505,11 +1565,57 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       (casts.get(`${h.def.id}:${isUlt ? "ult" : "skill"}`) ?? 0) + 1,
     )
     b.cooldown = Math.max(b.cooldown, 0.4)
+    // Cast lock (spec/09 §4): planted like an attack point.
+    if (b.swing) {
+      cancelBackswing(b.swing)
+      b.swing.castLock = CAST_LOCK
+    }
     return true
   }
 
   // --- movement (spec/11 locomotion: turn-rate gate, clearance nav, wall slide) ----
   const nav = new DynamicNav(map)
+  const rings = new AttackRings()
+  const ownerOf = new WeakMap<Mover, Body>()
+  const crowdWorld: CrowdWorld<Mover> = {
+    neighbors: (m, r, out) => {
+      for (const o of near(m, r)) if (o.alive && o.mover && o.phase! <= 0) out.push(o.mover)
+    },
+    walkable: (x, z, m) => {
+      const b = ownerOf.get(m)
+      return (b?.freePath ?? 0) > 0 || !nav.blocked({ x, z })
+    },
+    canYield: (m, dx, dz) => {
+      const b = ownerOf.get(m)
+      if (!b || b.st.stun > 0 || b.st.root > 0) return false
+      const t = b.target
+      if (m.mode !== "engaged" || !t || !t.alive) return true
+      return Math.hypot(b.x + dx - t.x, b.z + dz - t.z) <= reachOf(b, t)
+    },
+  }
+  /** Engage: in reach ⇒ swing; else move to the ring slot / target (spec/09 §3). */
+  const engageTarget = (b: Body, t: Body, dt: number) => {
+    b.target = t
+    const tr = t.mover?.radius ?? (t.structure ? (t.type === "tower" ? 0.8 : 1.2) : 0.4)
+    const plan = planEngage(
+      rings,
+      { id: b.id, x: b.x, z: b.z, range: b.range },
+      { id: t.id, x: t.x, z: t.z, radius: tr },
+      clock,
+      (id) => bodyById.get(id),
+      (id) => {
+        const o = bodyById.get(id)
+        return !!o && o.alive && dist(o, t) <= reachOf(o, t)
+      },
+    )
+    if (plan.inReach) {
+      if (b.mover) b.mover.mode = "engaged"
+      attack(b, t)
+      return
+    }
+    if (plan.slotted || dist(b, plan.goal) < 6 || b.type !== "hero") stepToward(b, plan.goal, plan.stopAt, dt)
+    else travel(b, plan.goal, plan.stopAt, dt)
+  }
 
   /**
    * Turn-gated step toward a point: rotate toward the goal; accelerate
@@ -1521,10 +1627,54 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       b.hero?.def.attack === "melee" && b.target?.type === "hero" && b.hero.intent === "fight"
     const spd =
       b.speed * statMul(b, "speed") * (1 - (b.st.slowT > 0 ? b.st.slow : 0)) * (chasing ? 1.12 : 1)
-    const save = b.speed
-    b.speed = spd
-    moveBody(b, nav, goal, stopAt, dt)
-    b.speed = save
+    if (b.swing && isLocked(b.swing)) return
+    if (b.swing) cancelBackswing(b.swing) // a move order cancels backswing (orb-walk)
+    if (!b.mover) {
+      const save = b.speed
+      b.speed = spd
+      moveBody(b, nav, goal, stopAt, dt)
+      b.speed = save
+      return
+    }
+    // Micro range (spec/09 §5): context steering around bodies, no A*.
+    let wp: Vec2 = goal
+    const gd = dist(b, goal)
+    b.micro = isMicro(b.micro ?? false, gd)
+    if (b.micro && gd > stopAt + 0.05) {
+      const blockers: Body[] = []
+      for (const o of near(b, 2)) if (o !== b && o.alive && dist(o, b) < 2) blockers.push(o)
+      const r = b.mover.radius
+      const w = microWaypoint(
+        b,
+        r,
+        goal,
+        blockers.map((o) => ({ x: o.x, z: o.z, radius: o.mover?.radius ?? crowdRadius(o) })),
+        (x, z) => !nav.blocked({ x, z }),
+      )
+      if (!w) return
+      wp = w
+    }
+    steer(b, wp, stopAt, spd, dt)
+  }
+
+  /**
+   * Preferred velocity toward `wp` (spec/09 §1): the only movement output of decision
+   * code. Turn rate still gates acceleration (spec/11); crowdStep integrates.
+   */
+  const steer = (b: Body, wp: Vec2, stopAt: number, spd: number, dt: number) => {
+    const m = b.mover!
+    const dx = wp.x - b.x
+    const dz = wp.z - b.z
+    const d = Math.hypot(dx, dz)
+    const left = d - stopAt
+    if (left <= 0.01) return
+    const desired = Math.atan2(dx, dz)
+    b.heading = turnToward(b.heading, desired, b.turnRate ?? TURN.mid, dt)
+    if (Math.abs(angDiff(desired, b.heading)) >= GATE * 4) return // turn in place first
+    const v = Math.min(spd, MAX_SPEED, left / dt)
+    m.pvx = (dx / d) * v
+    m.pvz = (dz / d) * v
+    m.maxSpeed = Math.min(MAX_SPEED, Math.max(spd, 0.1))
   }
 
   /** Travel to a far goal along a clearance-aware A* path (cached per body+goal). */
@@ -1677,12 +1827,26 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
   const buy = (b: Body) => {
     const h = b.hero!
-    for (let guard = 0; guard < 3; guard++) {
+    // Component-first (spec/10 layer 2): buy pieces as they become affordable,
+    // then pay the recipe to combine. Net spend equals the full item cost.
+    for (let guard = 0; guard < 8; guard++) {
       const next = nextItemOf(h)
       if (!next) return
-      const cost = itemById(next.id).cost
-      if (h.gold < cost) return
-      h.gold -= cost
+      const missing = missingComponents(allItems(h.inv), next.id)
+      if (missing.length > 0) {
+        const piece = missing[0]!
+        const pieceCost = itemById(piece).cost
+        if (h.gold < pieceCost) return
+        h.gold -= pieceCost
+        addItem(h.inv, piece)
+        h.items = effectiveItems(h.inv, clock)
+        recomputeStats(b)
+        continue // same target next guard iteration
+      }
+      const recipe = recipeCost(next.id)
+      if (h.gold < recipe) return
+      h.gold -= recipe
+      for (const c of itemById(next.id).components) removeItem(h.inv, c)
       addItem(h.inv, next.id)
       h.items = effectiveItems(h.inv, clock)
       if (next.adaptive) h.adaptiveDone = true
@@ -2180,14 +2344,67 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     return best
   }
 
+  /** Hull-adjusted reach of `b` against `t` (spec/09 §3). */
+  const reachOf = (b: Body, t: Body) =>
+    reach(b.range, t.structure ? (t.type === "tower" ? 0.8 : 1.2) : (t.mover?.radius ?? 0.4))
+  const swingClass = (b: Body) =>
+    b.type === "hero" || b.type === "creep" || b.type === "neutral" || b.type === "roshan" || b.type === "tower"
+      ? b.type
+      : "other"
+
+  /**
+   * Request an attack (spec/09 §4): starts the attack point when in reach and off
+   * cooldown. Damage lands later, in tickSwings, on the damage frame.
+   */
   const attack = (b: Body, t: Body) => {
     if (b.cooldown > 0 || b.st.stun > 0) return
-    if (dist(b, t) > b.range + 0.3) return
+    const sw = b.swing
+    if (sw && (sw.phase === "point" || sw.castLock > 0)) return
+    if (dist(b, t) > reachOf(b, t)) return
     b.heading = Math.atan2(t.x - b.x, t.z - b.z)
+    b.target = t
+    const asMul = statMul(b, "attackSpeed")
+    b.cooldown = b.attackTime / asMul
+    if (!sw) return strike(b, t)
+    beginSwing(sw, t.id, swingTiming(swingClass(b), b.attackTime, asMul), b.cooldown)
+    b.swings = (b.swings ?? 0) + 1
+    if (b.mover) {
+      b.mover.pvx = 0
+      b.mover.pvz = 0
+    }
+  }
+
+  const bodyById = new Map<string, Body>()
+  /** Advance every swing; deliver damage on the damage frame (spec/09 §4). */
+  const tickSwings = (dt: number) => {
+    for (const b of bodies) {
+      const sw = b.swing
+      if (!b.alive || !sw || (sw.phase === "idle" && sw.castLock === 0)) continue
+      const t = sw.targetId ? bodyById.get(sw.targetId) : undefined
+      const valid = !!t && t.alive && b.st.stun <= 0 && (t.st.cyclone ?? 0) <= 0
+      const ev = tickSwing(sw, dt, valid, t ? dist(b, t) : Infinity, t ? reachOf(b, t) : 0)
+      if (ev === "damage" && t) {
+        b.heading = Math.atan2(t.x - b.x, t.z - b.z)
+        strike(b, t)
+        swingStats.landed++
+      } else if (ev === "cancel") {
+        b.cooldown = Math.max(0, b.cooldown - sw.charged) // refund (§4)
+        swingStats.cancelled++
+      }
+    }
+  }
+  const swingStats = { landed: 0, cancelled: 0 }
+
+  /** Damage frame: the old instant attack body. */
+  const strike = (b: Body, t: Body) => {
     let dmg = b.damage * statMul(b, "attack")
     if (b.hero) dmg *= rng.range(0.9, 1.1)
     deal(b, t, dmg, "physical")
-    b.swings = (b.swings ?? 0) + 1
+    if (b.type === "roshan") {
+      // Roshan cleaves on the damage frame (review §6).
+      for (const o of heroes)
+        if (o !== t && o.alive && dist(o, t) < 2) deal(b, o, b.damage * 0.5, "physical")
+    }
     // Attack reveal (spec/08 §4a): firing from fog exposes the attacker to
     // the victim's team for 2.0 s (non-stacking bubbles are fine — same window).
     if (b.type === "hero")
@@ -2197,7 +2414,6 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         z: b.z,
         until: clock + ATTACK_REVEAL_TICKS / 10,
       })
-    b.cooldown = b.attackTime / statMul(b, "attackSpeed")
     if (b.range > 2.5) {
       const style =
         b.type === "tower"
@@ -2597,6 +2813,42 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
   }
 
+  /** Crowd pass (spec/09 §1–§2, §6): the only integrator of mover positions. */
+  const movers: Mover[] = []
+  const crowdTick = (dt: number) => {
+    movers.length = 0
+    for (const b of bodies) {
+      const m = b.mover
+      if (!b.alive || !m) continue
+      // Teleports (respawn, dash, displace) since last tick: resync and drop velocity.
+      if (Math.abs(m.x - b.x) > 1e-9 || Math.abs(m.z - b.z) > 1e-9) {
+        m.x = b.x
+        m.z = b.z
+        m.vx = 0
+        m.vz = 0
+      }
+      if (b.st.stun > 0 || b.st.root > 0) {
+        m.pvx = 0
+        m.pvz = 0
+      }
+      m.mode = b.swing && isLocked(b.swing) ? "locked" : m.mode
+      ownerOf.set(m, b)
+      movers.push(m)
+    }
+    crowdStep(movers, dt, crowdWorld)
+    for (const m of movers) {
+      const b = ownerOf.get(m)!
+      b.x = m.x
+      b.z = m.z
+      b.velMag = Math.hypot(m.vx, m.vz)
+      if (b.velMag > 0.2 && !(b.swing && isLocked(b.swing))) b.heading = Math.atan2(m.vx, m.vz)
+      // Reset per-tick inputs.
+      m.pvx = 0
+      m.pvz = 0
+      m.mode = "free" satisfies CrowdMode
+    }
+  }
+
   const step = (dt: number) => {
     if (winner) return
     clock += dt
@@ -2635,6 +2887,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if (b.phase! > 0) b.phase = Math.max(0, b.phase! - dt)
       if (b.freePath! > 0) b.freePath = Math.max(0, b.freePath! - dt)
     }
+    bodyById.clear()
+    for (const b of bodies) if (b.alive) bodyById.set(b.id, b)
+    // Attack phases (spec/09 §4): damage frames land before new decisions.
+    tickSwings(dt)
     // Spell projectiles move and resolve after status, before hero actions (spec/09).
     tickProjectiles(dt)
 
@@ -2734,9 +2990,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         )
       const leash = h.intent === "lane" ? 7 : h.intent === "ward" || h.intent === "shop" ? 3 : 99
       if (target && dive && dist(b, target) < leash) {
-        b.target = target
-        if (dist(b, target) > b.range) moveToward(b, target, b.range * 0.9, dt)
-        attack(b, target)
+        engageTarget(b, target, dt)
       } else if (h.goal) {
         b.target = undefined
         travel(b, h.goal, 1.2, dt)
@@ -2749,9 +3003,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       const lane = lanes.get(b.lane!)!
       const target = chooseTarget(b, 5)
       if (target) {
-        b.target = target
-        if (dist(b, target) > b.range) moveToward(b, target, b.range * 0.9, dt)
-        else attack(b, target)
+        engageTarget(b, target, dt)
         b.s = b.team === "radiant" ? lane.project(b.x, b.z) : lane.length - lane.project(b.x, b.z)
       } else if (b.st.stun <= 0 && b.st.root <= 0) {
         b.s = (b.s ?? 0) + b.speed * (1 - (b.st.slowT > 0 ? b.st.slow : 0)) * dt
@@ -2762,10 +3014,18 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         const tz = p.tz * dir
         const nx = p.x - tz * (b.side ?? 0)
         const nz = p.z + tx * (b.side ?? 0)
-        b.heading = Math.atan2(nx - b.x, nz - b.z)
-        // Ease back onto the lane if knocked off it by a chase.
-        b.x += (nx - b.x) * Math.min(1, 6 * dt)
-        b.z += (nz - b.z) * Math.min(1, 6 * dt)
+        // Lane following as a preferred velocity (review §7); ORCA integrates.
+        const m = b.mover!
+        const ex = nx - b.x
+        const ez = nz - b.z
+        const el = Math.hypot(ex, ez)
+        const v = Math.min(MAX_SPEED, el / dt, b.speed * 1.6)
+        if (el > 1e-6) {
+          m.pvx = (ex / el) * v
+          m.pvz = (ez / el) * v
+          m.maxSpeed = Math.max(v, b.speed)
+          b.heading = Math.atan2(ex, ez)
+        }
         if ((b.s ?? 0) > lane.length + 2) b.alive = false
       }
     }
@@ -2779,13 +3039,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           ? b.lastHit
           : undefined
       if (aggro) {
-        if (dist(b, aggro) > b.range) moveToward(b, aggro, b.range * 0.9, dt)
-        attack(b, aggro)
-        if (b.type === "roshan" && b.cooldown === b.attackTime) {
-          // Roshan cleaves.
-          for (const o of heroes)
-            if (o !== aggro && o.alive && dist(o, aggro) < 2) deal(b, o, b.damage * 0.5, "physical")
-        }
+        engageTarget(b, aggro, dt)
       } else {
         b.lastHit = undefined
         if (dist(b, home) > 0.8) moveToward(b, home, 0.5, dt)
@@ -2799,6 +3053,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       const t = chooseTarget(b, b.range)
       if (t) attack(b, t)
     }
+
+    crowdTick(dt)
 
     // AI coaches
     for (const side of aiSides) aiCoach(side)

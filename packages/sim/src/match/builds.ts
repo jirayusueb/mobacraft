@@ -173,14 +173,26 @@ const blocked = (v: PurchaseView): ReadonlySet<string> => {
   return r?.then.kind === "buy-before" ? new Set([r.then.before]) : new Set()
 }
 
+/**
+ * Unified sell order (spec/10 layer 5): consumables first, then lowest tier,
+ * then cheapest, then item id — never the rule items themselves.
+ */
 const makeRoom = (v: PurchaseView): string | undefined | null => {
   if (v.items.length < MAX_ITEMS) return undefined
-  // Sell the cheapest item that no rule bought (never sell the rule items themselves).
   const ruleItems = new Set(ITEM_RULES.map((r) => r.then.item))
   const sellable = v.items
     .filter((i) => !ruleItems.has(i))
-    .toSorted((a, b) => lookupItem(a).cost - lookupItem(b).cost)
+    .toSorted(
+      (a, b) =>
+        tierRank(a) - tierRank(b) || lookupItem(a).cost - lookupItem(b).cost || (a < b ? -1 : 1),
+    )
   return sellable[0] ?? null
+}
+
+/** Consumables sell first (spec/10); unused until consumable items exist. */
+const tierRank = (id: string): number => {
+  const it = lookupItem(id)
+  return it.tags.includes("consumable") ? 0 : it.tier
 }
 
 /**
