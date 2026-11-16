@@ -1,4 +1,5 @@
 import type { MobaMap } from "@mobacraft/map"
+import { ALL_CREATURE_KINDS, LANE_CREEP_KINDS } from "@mobacraft/sim"
 import {
   Castle,
   Droplets,
@@ -38,13 +39,43 @@ export const KIND_ICON: Record<string, LucideIcon> = {
   shop: Store,
   "secret-shop": KeyRound,
   roshan: Skull,
+  "creature:roshan": Skull,
+  "radiant-siege": Shield,
+  "dire-siege": Shield,
   rune: Sparkles,
   "camp-small": PawPrint,
   "camp-medium": PawPrint,
   "camp-large": PawPrint,
   "camp-ancient": PawPrint,
 }
-export const iconFor = (kind: string): LucideIcon => KIND_ICON[kind] ?? Castle
+export const iconFor = (kind: string): LucideIcon =>
+  KIND_ICON[kind] ?? (CREEP_KINDS.has(kind) ? Swords : NEUTRAL_KINDS.has(kind) ? PawPrint : Castle)
+
+const CREEP_KINDS = new Set(LANE_CREEP_KINDS as readonly string[])
+const NEUTRAL_KINDS = new Set(
+  ALL_CREATURE_KINDS.filter((k) => !CREEP_KINDS.has(k)) as readonly string[],
+)
+
+/**
+ * Entity for a picked creature. Creatures move and aren't in the static index,
+ * so the card is built from the pick itself; the camera follows it instead of a fixed grid.
+ */
+export const creatureEntity = (picked: {
+  id: string
+  kind: string
+  team: string
+  name?: string
+}): Entity | null =>
+  picked.id.startsWith("creature-")
+    ? {
+        id: picked.id,
+        // "roshan" is also the pit landmark's kind; keep the creature's copy distinct.
+        kind: picked.kind === "roshan" ? "creature:roshan" : picked.kind,
+        team: asTeam(picked.team),
+        name: picked.name ?? picked.kind,
+        position: { x: Number.NaN, z: Number.NaN },
+      }
+    : null
 
 export const teamName = (team: TeamId) => t(`team.${team}`)
 

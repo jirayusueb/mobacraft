@@ -20,6 +20,9 @@ import type { Pose } from "./camera-rig.ts"
 import { color as tslColor, mix, screenUV, smoothstep, uniform } from "three/tsl"
 import { createPost } from "./post.ts"
 import { buildFoliage } from "./scene/foliage.ts"
+import { createCreepSim, CREATURE_NAME, type Creature } from "@mobacraft/sim"
+import { creatureModel } from "./creatures/kit.ts"
+import { createCreatureLayer } from "./creatures/render.ts"
 import { buildAmbient } from "./scene/ambient.ts"
 import { buildLaneProps } from "./scene/lane-props.ts"
 import { buildSelectionRing, buildStructures, nightGlow } from "./scene/structures.ts"
@@ -31,6 +34,8 @@ export interface Picked {
   readonly id: string
   readonly kind: string
   readonly team: string
+  /** Display name when the kind alone isn't enough (creatures). */
+  readonly name?: string
 }
 
 export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
@@ -49,8 +54,22 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
   const { visuals: structures, pickables } = buildStructures(map)
   const laneProps = buildLaneProps(map)
   const ambient = buildAmbient(map)
+  // Creatures: the sim owns where they are; the layer only draws snapshots.
+  const sim = createCreepSim(map)
+  const creatures = createCreatureLayer(map)
+  let snapshot: readonly Creature[] = []
   const ring = buildSelectionRing()
-  scene.add(terrain, water, foliage, laneProps, structures, pickables, ring, ambient.group)
+  scene.add(
+    terrain,
+    water,
+    foliage,
+    laneProps,
+    structures,
+    pickables,
+    ring,
+    ambient.group,
+    creatures.group,
+  )
   for (const o of [terrain, water, foliage, laneProps, structures, pickables]) {
     o.traverse((c) => {
       c.matrixAutoUpdate = false
@@ -146,7 +165,27 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
   const pick = (ndcX: number, ndcY: number): Picked | null => {
     ndc.set(ndcX, ndcY)
     raycaster.setFromCamera(ndc, camera)
-    const o = raycaster.intersectObject(pickables, true)[0]?.object
+    const hit = raycaster.intersectObject(pickables, true)[0]
+    // Creatures: nearest one whose body the ray passes through (sampled at mid-height).
+    const { origin, direction } = raycaster.ray
+    let best: { c: Creature; t: number } | null = null
+    for (const c of snapshot) {
+      const model = creatureModel(c.kind)
+      const y = map.heightAt(c.x, c.z) + model.height * 0.5
+      const t = (y - origin.y) / direction.y
+      const dx = origin.x + direction.x * t - c.x
+      const dz = origin.z + direction.z * t - c.z
+      if (Math.hypot(dx, dz) < Math.max(0.45, model.radius * 0.9) && (!best || t < best.t))
+        best = { c, t }
+    }
+    // Creatures win over camp/landmark proxies (they stand inside them); buildings
+    // still win when clearly in front.
+    const proxyIsArea = hit && String(hit.object.userData.kind).match(/^camp-|^roshan$|^rune$/)
+    if (best && (!hit || proxyIsArea || best.t < hit.distance)) {
+      const c = best.c
+      return { id: `creature-${c.id}`, kind: c.kind, team: c.team, name: CREATURE_NAME[c.kind] }
+    }
+    const o = hit?.object
     return o
       ? {
           id: o.userData.id as string,
@@ -154,6 +193,11 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
           team: o.userData.team as string,
         }
       : null
+  }
+  /** Current position of a picked creature (they move), for the ring and camera follow. */
+  const creatureById = (id: string) => {
+    const n = Number(id.slice("creature-".length))
+    return snapshot.find((c) => c.id === n)
   }
   /** Ground point under the cursor (for zoom-to-cursor and focus). */
   const groundAt = (ndcX: number, ndcY: number) => {
@@ -163,7 +207,18 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     return hit ? { x: hit.point.x, z: hit.point.z } : null
   }
 
+  let highlighted: string | null = null
   const highlight = (id: string | null) => {
+    highlighted = id
+    if (id?.startsWith("creature-")) {
+      const c = creatureById(id)
+      ring.visible = c !== undefined
+      if (!c) return
+      const r = creatureModel(c.kind).radius + 0.3
+      ring.position.set(c.x, map.heightAt(c.x, c.z) + 0.08, c.z)
+      ring.scale.set(r, 1, r)
+      return
+    }
     const target = id ? pickables.getObjectByName(id) : undefined
     ring.visible = target !== undefined
     if (!target) return
@@ -179,6 +234,14 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     pick,
     groundAt,
     highlight,
+    /** Advance creature sim; the ring follows a selected creature. */
+    tick: (dt: number) => {
+      sim.step(dt)
+      snapshot = sim.creatures()
+      creatures.update(snapshot)
+      if (highlighted?.startsWith("creature-")) highlight(highlighted)
+    },
+    creatureById,
     render: () => post.render(),
     stats: () => ({
       calls: renderer.info.render.drawCalls,
@@ -186,6 +249,7 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     }),
     dispose: () => {
       post.dispose()
+      creatures.dispose()
       scene.traverse((o) => {
         if (o instanceof Mesh) {
           o.geometry.dispose()

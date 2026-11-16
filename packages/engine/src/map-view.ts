@@ -16,6 +16,7 @@
 import type { MobaMap } from "@mobacraft/map"
 import { Context, Effect, Layer, Stream, SubscriptionRef } from "effect"
 import { WebGPURenderer } from "three/webgpu"
+import { CREATURE_NAME } from "@mobacraft/sim"
 import { createRig } from "./camera-rig.ts"
 import { RendererInitError } from "./errors.ts"
 import { createWorld, type Picked } from "./world.ts"
@@ -170,6 +171,8 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     }
   }
   let drag: { x: number; y: number; moved: number } | null = null
+  /** Creature id the camera is tracking, if any. */
+  let following: string | null = null
   const keys = new Set<string>()
   const held = (a: string, b: string) => (keys.has(a) || keys.has(b) ? 1 : 0)
 
@@ -182,7 +185,10 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
       const dx = e.clientX - drag.x
       const dy = e.clientY - drag.y
       drag = { x: e.clientX, y: e.clientY, moved: drag.moved + Math.abs(dx) + Math.abs(dy) }
-      if (drag.moved > 4) rig.panPixels(dx, dy, canvas.clientHeight)
+      if (drag.moved > 4) {
+        following = null
+        rig.panPixels(dx, dy, canvas.clientHeight)
+      }
       canvas.style.cursor = drag.moved > 4 ? "grabbing" : canvas.style.cursor
     } else {
       const p = ndc(e)
@@ -195,6 +201,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
       const p = ndc(e)
       const hit = world.pick(p.x, p.y)
       local.selected = hit
+      following = hit?.id.startsWith("creature-") ? hit.id : null
       world.highlight(hit?.id ?? null)
     }
     if (drag && drag.moved > 4) rig.release()
@@ -241,6 +248,13 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     const up = held("w", "arrowup") - held("s", "arrowdown")
     if (right || up) rig.panScreen(right * pan, up * pan)
 
+    world.tick(dt)
+    // Follow a selected creature until the user pans away.
+    if (following) {
+      const c = world.creatureById(following)
+      if (c) rig.focus(c.x, c.z)
+      else following = null
+    }
     rig.update(dt)
     world.applyPose(rig.pose())
     world.render()
@@ -274,6 +288,14 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     home: () => rig.home(),
     focus: (x, z) => rig.focus(x, z),
     select: (id) => {
+      if (id?.startsWith("creature-")) {
+        const c = world.creatureById(id)
+        local.selected = c ? { id, kind: c.kind, team: c.team, name: CREATURE_NAME[c.kind] } : null
+        following = c ? id : null
+        world.highlight(local.selected?.id ?? null)
+        return
+      }
+      following = null
       const s =
         id === null
           ? null

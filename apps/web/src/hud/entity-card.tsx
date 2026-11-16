@@ -100,11 +100,13 @@ export const SelectedCard = ({
               <span className="tabular-nums">{entity.tier}</span>
             </Row>
           ) : null}
-          <Row label={t("hud.card.grid")}>
-            <span className="font-mono text-[11px] text-white/75 tabular-nums">
-              {Math.round(entity.position.x)}, {Math.round(entity.position.z)}
-            </span>
-          </Row>
+          {Number.isFinite(entity.position.x) ? (
+            <Row label={t("hud.card.grid")}>
+              <span className="font-mono text-[11px] text-white/75 tabular-nums">
+                {Math.round(entity.position.x)}, {Math.round(entity.position.z)}
+              </span>
+            </Row>
+          ) : null}
         </dl>
         <Button
           size="sm"

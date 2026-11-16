@@ -63,3 +63,15 @@ resources — so React's effect cleanup is one `Scope.close`.
 - **Draw calls**: structures are ~110 small meshes; budget raised to < 400
   draw calls including the shadow pass. Merging structures is a later
   optimisation if profiling shows it matters.
+
+## Creatures (milestone 1.5)
+
+- `@mobacraft/sim` owns _where creatures are_; `engine/creatures` owns _what they look like_.
+  Seam: the `Creature` snapshot (id, kind, team, x, z, heading, state). The renderer
+  never decides behaviour; the sim never touches three.js.
+- Art direction: polygon dark fantasy — faceted flat-shaded low-poly, chunky readable
+  silhouettes, glowing eyes/runes (`glow` attribute → emissive → night bloom).
+- Model kit contract: `engine/src/creatures/contract.ts` (attributes position, normal,
+  color, glow, limb; feet at y=0, +z forward). Gait animation is TSL-only.
+- Rendering: one InstancedMesh per kind (≤ 23 draw calls); per-frame CPU = instance matrices.
+- No combat/HP yet: waves "clash" (hold for a few seconds) and march on.

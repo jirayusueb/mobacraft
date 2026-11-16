@@ -20,6 +20,7 @@
       "dependencies": {
         "@mobacraft/engine": "workspace:*",
         "@mobacraft/map": "workspace:*",
+        "@mobacraft/sim": "workspace:*",
         "@mobacraft/ui": "workspace:*",
         "effect": "^4.1.4",
         "lucide-react": "^1.73.0",
@@ -40,6 +41,7 @@
       "name": "@mobacraft/engine",
       "dependencies": {
         "@mobacraft/map": "workspace:*",
+        "@mobacraft/sim": "workspace:*",
         "effect": "^4.1.4",
         "three": "^0.187.0",
       },
@@ -49,6 +51,12 @@
     },
     "packages/map": {
       "name": "@mobacraft/map",
+    },
+    "packages/sim": {
+      "name": "@mobacraft/sim",
+      "dependencies": {
+        "@mobacraft/map": "workspace:*",
+      },
     },
     "packages/ui": {
       "name": "@mobacraft/ui",
@@ -136,6 +144,8 @@
     "@mobacraft/engine": ["@mobacraft/engine@workspace:packages/engine"],
 
     "@mobacraft/map": ["@mobacraft/map@workspace:packages/map"],
+
+    "@mobacraft/sim": ["@mobacraft/sim@workspace:packages/sim"],
 
     "@mobacraft/ui": ["@mobacraft/ui@workspace:packages/ui"],
 

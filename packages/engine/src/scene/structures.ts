@@ -1,21 +1,37 @@
-import type { Camp, Landmark, MobaMap, Structure } from "@mobacraft/map"
+import type { Camp, Landmark, MobaMap, Structure, Vec2 } from "@mobacraft/map"
 import {
   BoxGeometry,
+  BufferAttribute,
+  BufferGeometry,
+  CircleGeometry,
   ConeGeometry,
   CylinderGeometry,
   DodecahedronGeometry,
   ExtrudeGeometry,
   Group,
   IcosahedronGeometry,
+  LatheGeometry,
   Mesh,
   MeshStandardNodeMaterial,
   MeshBasicNodeMaterial,
   OctahedronGeometry,
+  RingGeometry,
   Shape,
   TorusGeometry,
-  type BufferGeometry,
+  Vector2,
 } from "three/webgpu"
-import { color, float, sin, time, uniform } from "three/tsl"
+import {
+  abs,
+  attribute,
+  color,
+  float,
+  positionLocal,
+  sin,
+  smoothstep,
+  time,
+  uniform,
+  vec2,
+} from "three/tsl"
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
 import { TEAM, WINDOW } from "../palette.ts"
 
@@ -24,15 +40,23 @@ export const nightGlow = uniform(0)
 
 type Palette = (typeof TEAM)[keyof typeof TEAM]
 
+const ROCK = { light: 0x6b6762, dark: 0x57534f, moss: 0x5f7a3a, floor: 0x2e2a27, earth: 0x4f4a44 }
+const BONE = 0xe6dcc4
+
 const materials = new Map<string, MeshStandardNodeMaterial>()
-const mat = (hex: number, opts: { emissive?: boolean; pulse?: boolean } = {}) => {
-  const key = `${hex}-${opts.emissive ?? false}-${opts.pulse ?? false}`
+/**
+ * Shared flat-shaded material per colour (+ emissive variant). Every part goes
+ * through here so baking can merge by material. `glow` scales the emissive.
+ */
+const mat = (hex: number, opts: { emissive?: boolean; pulse?: boolean; glow?: number } = {}) => {
+  const glowScale = opts.glow ?? 1
+  const key = `${hex}-${opts.emissive ?? false}-${opts.pulse ?? false}-${glowScale}`
   let m = materials.get(key)
   if (!m) {
     m = new MeshStandardNodeMaterial({ color: hex, roughness: 0.85, flatShading: true })
     if (opts.emissive) {
       const glow = opts.pulse ? sin(time.mul(2)).mul(0.35).add(1.15) : float(1)
-      m.emissiveNode = color(hex).mul(glow)
+      m.emissiveNode = color(hex).mul(glow).mul(glowScale)
     }
     materials.set(key, m)
   }
@@ -54,6 +78,18 @@ const windowMat = (() => {
   return m
 })()
 
+/** Small deterministic PRNG so rocks and stonework look hand-placed but stable. */
+const rng = (seed: number) => {
+  let s = seed >>> 0
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0
+    let t = s
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
 /** Ring of `n` boxes around the Y axis — crenellations, fence posts, stones. */
 const ringOf = (
   n: number,
@@ -70,8 +106,8 @@ const ringOf = (
     return m
   })
 
-/** Gabled roof: a triangular prism along X, eaves overhanging, ridge at height `h`. */
-const gable = (length: number, depth: number, h: number) => {
+/** Triangular gable-end wall: prism along X, base `depth` wide, apex at `h`. */
+const gableWall = (length: number, depth: number, h: number) => {
   const shape = new Shape()
   shape.moveTo(-depth / 2, 0)
   shape.lineTo(depth / 2, 0)
@@ -82,41 +118,325 @@ const gable = (length: number, depth: number, h: number) => {
     .rotateY(Math.PI / 2)
 }
 
-const tower = (p: Palette, tier: number) => {
+/**
+ * Thick chevron roof slab along X. Its underside follows the wall pitch (wall top
+ * at y=0, ridge at `h`) and it overhangs the walls by `over` on every side.
+ */
+const roofSlab = (length: number, depth: number, h: number, over: number, t = 0.08) => {
+  const k = h / (depth / 2)
+  const half = depth / 2 + over
+  const shape = new Shape()
+  shape.moveTo(-half, h + t - k * half)
+  shape.lineTo(0, h + t)
+  shape.lineTo(half, h + t - k * half)
+  shape.lineTo(half, h - k * half)
+  shape.lineTo(0, h)
+  shape.lineTo(-half, h - k * half)
+  shape.closePath()
+  return new ExtrudeGeometry(shape, { depth: length + over * 2, bevelEnabled: false })
+    .translate(0, 0, -(length + over * 2) / 2)
+    .rotateY(Math.PI / 2)
+}
+
+/**
+ * A recessed opening on a wall whose outer face is the local z=0 plane: the
+ * pane/leaf sits just proud of the wall while a frame (jambs, lintel, sill)
+ * stands further out, so the opening reads as set back.
+ */
+const opening = (
+  w: number,
+  h: number,
+  fill: MeshStandardNodeMaterial,
+  frame: MeshStandardNodeMaterial,
+  mullion?: MeshStandardNodeMaterial,
+) => {
   const g = new Group()
-  const h = 1.9 + tier * 0.3
   g.add(
-    // Stepped stone footing.
-    part(new CylinderGeometry(0.85, 0.95, 0.22, 8), mat(p.stoneDark), 0, 0.11),
-    part(new CylinderGeometry(0.72, 0.8, 0.2, 8), mat(p.stone), 0, 0.32),
-    // Shaft with two darker stone courses.
-    part(new CylinderGeometry(0.42, 0.55, h, 8).translate(0, h / 2, 0), mat(p.stone), 0, 0.42),
-    part(new CylinderGeometry(0.5, 0.5, 0.1, 8), mat(p.stoneDark), 0, 0.42 + h * 0.35),
-    part(new CylinderGeometry(0.46, 0.46, 0.1, 8), mat(p.stoneDark), 0, 0.42 + h * 0.7),
-    // Arrow-slit window facing out.
-    part(new BoxGeometry(0.12, 0.34, 0.06), windowMat, 0, 0.42 + h * 0.52, 0.47),
-    // Battlement platform + crenellations.
-    part(new CylinderGeometry(0.66, 0.5, 0.22, 8), mat(p.stoneDark), 0, h + 0.5),
-    ...ringOf(8, 0.58, () => new BoxGeometry(0.16, 0.2, 0.12), mat(p.stone), h + 0.71, Math.PI / 8),
-    // Roof cap + glowing team crystal.
-    part(new ConeGeometry(0.52, 0.85, 8), mat(p.roof), 0, h + 1.15),
-    part(new CylinderGeometry(0.03, 0.03, 0.5, 4), mat(p.wood), 0, h + 1.7),
+    part(new BoxGeometry(w, h, 0.04), fill),
+    part(new BoxGeometry(0.06, h + 0.02, 0.09), frame, -(w / 2 + 0.03), 0, 0.04),
+    part(new BoxGeometry(0.06, h + 0.02, 0.09), frame, w / 2 + 0.03, 0, 0.04),
+    part(new BoxGeometry(w + 0.16, 0.07, 0.1), frame, 0, h / 2 + 0.035, 0.045),
+    part(new BoxGeometry(w + 0.14, 0.05, 0.12), frame, 0, -h / 2 - 0.025, 0.05),
+  )
+  if (mullion) {
+    g.add(
+      part(new BoxGeometry(0.03, h, 0.03), mullion, 0, 0, 0.025),
+      part(new BoxGeometry(w, 0.03, 0.03), mullion, 0, 0, 0.025),
+    )
+  }
+  return g
+}
+
+/** Place `obj` on a wall face: `face` 0=+z, 1=+x, 2=-z, 3=-x at distance `dist`. */
+const onFace = (obj: Group, face: number, dist: number, along: number, y: number) => {
+  const a = (face * Math.PI) / 2
+  obj.rotation.y = a
+  obj.position.set(
+    Math.sin(a) * dist + Math.cos(a) * along,
+    y,
+    Math.cos(a) * dist - Math.sin(a) * along,
+  )
+  return obj
+}
+
+/** Irregular low-poly boulder; returns the rock plus an optional moss cap. */
+const boulder = (
+  rand: () => number,
+  r: number,
+  x: number,
+  y: number,
+  z: number,
+  sx: number,
+  sy: number,
+  sz: number,
+  moss: boolean,
+) => {
+  const ico = rand() < 0.5
+  const geo = () => (ico ? new IcosahedronGeometry(r, 0) : new DodecahedronGeometry(r, 0))
+  const rx = rand() * 0.5 - 0.25
+  const ry = rand() * Math.PI * 2
+  const rz = rand() * 0.5 - 0.25
+  const rock = part(geo(), mat(rand() < 0.5 ? ROCK.light : ROCK.dark), x, y, z)
+  rock.scale.set(sx, sy, sz)
+  rock.rotation.set(rx, ry, rz)
+  const out = [rock]
+  if (moss) {
+    const cap = part(geo(), mat(ROCK.moss), x, y + r * sy * 0.55, z)
+    cap.scale.set(sx * 0.86, sy * 0.42, sz * 0.86)
+    cap.rotation.set(rx, ry, rz)
+    out.push(cap)
+  }
+  return out
+}
+
+/** Pointed horn/spike: a 4-sided cone tipped outward by `tilt` toward local +z, then yawed. */
+const horn = (
+  material: MeshStandardNodeMaterial,
+  r: number,
+  len: number,
+  tilt: number,
+  yaw: number,
+  x: number,
+  y: number,
+  z: number,
+) =>
+  part(
+    new ConeGeometry(r, len, 4)
+      .translate(0, len / 2, 0)
+      .rotateX(tilt)
+      .rotateY(yaw),
+    material,
+    x,
+    y,
+    z,
+  )
+
+// --- contact shadows ----------------------------------------------------------
+
+interface Blob {
+  x: number
+  y: number
+  z: number
+  rx: number
+  rz: number
+  rot: number
+  strength: number
+}
+
+const BLOB_SEGMENTS = 20
+
+/**
+ * All contact shadows in one mesh. Each blob is a fan with a plateau: centre and
+ * inner ring carry `blob = strength`, rim carries 0, so the shader just shapes it.
+ */
+const buildBlobs = (blobs: readonly Blob[]) => {
+  const n = BLOB_SEGMENTS
+  const perBlob = 1 + n * 2
+  const pos = new Float32Array(blobs.length * perBlob * 3)
+  const val = new Float32Array(blobs.length * perBlob)
+  const idx: number[] = []
+  blobs.forEach((b, i) => {
+    const base = i * perBlob
+    const c = Math.cos(b.rot)
+    const s = Math.sin(b.rot)
+    const put = (v: number, lx: number, lz: number, value: number) => {
+      pos[(base + v) * 3] = b.x + lx * c + lz * s
+      pos[(base + v) * 3 + 1] = b.y + 0.02
+      pos[(base + v) * 3 + 2] = b.z - lx * s + lz * c
+      val[base + v] = value
+    }
+    put(0, 0, 0, b.strength)
+    for (let k = 0; k < n; k++) {
+      const a = (k / n) * Math.PI * 2
+      put(1 + k, Math.cos(a) * b.rx * 0.5, Math.sin(a) * b.rz * 0.5, b.strength)
+      put(1 + n + k, Math.cos(a) * b.rx, Math.sin(a) * b.rz, 0)
+    }
+    for (let k = 0; k < n; k++) {
+      const k1 = (k + 1) % n
+      const i0 = base + 1 + k
+      const i1 = base + 1 + k1
+      const o0 = base + 1 + n + k
+      const o1 = base + 1 + n + k1
+      // Counter-clockwise seen from above (+Y normal).
+      idx.push(base, i1, i0, i0, i1, o1, i0, o1, o0)
+    }
+  })
+  const geo = new BufferGeometry()
+  geo.setAttribute("position", new BufferAttribute(pos, 3))
+  geo.setAttribute("blob", new BufferAttribute(val, 1))
+  geo.setIndex(idx)
+  const m = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false })
+  m.colorNode = color(0x1c1610)
+  m.opacityNode = smoothstep(float(0), float(0.85), attribute("blob", "float")).mul(0.35)
+  const mesh = new Mesh(geo, m)
+  mesh.name = "contact-shadows"
+  mesh.renderOrder = 1
+  return mesh
+}
+
+// --- buildings ----------------------------------------------------------------
+
+/** Octagonal prism with flat faces on the axes. */
+const oct = (top: number, bottom: number, height: number) =>
+  new CylinderGeometry(top, bottom, height, 8).rotateY(Math.PI / 8)
+
+const tower = (p: Palette, tier: number, dire: boolean, seed: number) => {
+  const g = new Group()
+  const h = 1.8 + tier * 0.3
+  const y0 = 0.43
+  const rb = 0.58
+  const rt = 0.44
+  const cos8 = Math.cos(Math.PI / 8)
+  /** Shaft radius at fraction `t` of the height (flat-face distance). */
+  const rAt = (t: number) => (rb - (rb - rt) * t) * cos8
+  const yTop = y0 + h
+  g.add(
+    // Stone plinth sunk into the ground, then a stepped footing.
+    part(oct(0.98, 1.06, 0.4), mat(p.stoneDark), 0, 0.05),
+    part(oct(0.8, 0.88, 0.18), mat(p.stone), 0, 0.34),
+    // Tapered shaft.
+    part(oct(rt, rb, h).translate(0, h / 2, 0), mat(p.stone), 0, y0),
+  )
+  // Stone courses: a heavy base course and two thinner bands.
+  for (const [t, th, out] of [
+    [0.03, 0.12, 0.05],
+    [0.36, 0.07, 0.035],
+    [0.68, 0.07, 0.035],
+  ] as const) {
+    const r = rb - (rb - rt) * t + out
+    g.add(part(oct(r, r, th), mat(p.stoneDark), 0, y0 + h * t))
+  }
+  // A few proud ashlar blocks so the shaft is not a clean extrusion.
+  const rand = rng(seed)
+  for (let k = 0; k < 6; k++) {
+    const face = Math.floor(rand() * 8)
+    const t = 0.12 + rand() * 0.75
+    if (face === 0 && t < 0.3) continue // keep the door clear
+    const a = (face / 8) * Math.PI * 2
+    const r = rAt(t)
+    const block = part(
+      new BoxGeometry(0.18 + rand() * 0.1, 0.1, 0.06),
+      mat(p.stoneDark),
+      Math.sin(a) * r,
+      y0 + h * t,
+      Math.cos(a) * r,
+    )
+    block.rotation.y = a
+    g.add(block)
+  }
+  // Small arched door at the base and an arrow-slit window, both on the front face.
+  const door = opening(0.26, 0.4, mat(p.wood), mat(p.stoneDark))
+  door.add(
+    part(
+      new CylinderGeometry(0.17, 0.17, 0.09, 8, 1, false, -Math.PI / 2, Math.PI).rotateX(
+        Math.PI / 2,
+      ),
+      mat(p.stoneDark),
+      0,
+      0.235,
+      0.045,
+    ),
+  )
+  g.add(onFace(door, 0, rAt(0.08) + 0.01, 0, y0 + 0.2))
+  g.add(onFace(opening(0.09, 0.3, windowMat, mat(p.stoneDark)), 0, rAt(0.52), 0, y0 + h * 0.52))
+  g.add(onFace(opening(0.09, 0.26, windowMat, mat(p.stoneDark)), 2, rAt(0.5), 0, y0 + h * 0.5))
+  // Timber corbels and a hoarding floor carrying the battlement.
+  const rTop = rt * cos8
+  g.add(
+    ...ringOf(8, rTop + 0.06, () => new BoxGeometry(0.12, 0.18, 0.1), mat(p.wood), yTop - 0.12),
+    part(oct(0.78, 0.74, 0.07), mat(p.wood), 0, yTop + 0.01),
+    part(oct(0.74, 0.62, 0.24), mat(p.stoneDark), 0, yTop + 0.16),
+  )
+  const merlonY = yTop + 0.39
+  if (dire) {
+    // Pointed iron-and-bone merlons.
+    g.add(
+      ...ringOf(8, 0.64, () => new BoxGeometry(0.16, 0.2, 0.12), mat(p.stone), merlonY - 0.02),
+      ...ringOf(8, 0.64, () => new ConeGeometry(0.08, 0.18, 4), mat(p.spike), merlonY + 0.17),
+    )
+  } else {
+    g.add(...ringOf(8, 0.64, () => new BoxGeometry(0.17, 0.22, 0.13), mat(p.stone), merlonY))
+  }
+  // Roof on four short posts, overhanging the merlons, with a dark eave band.
+  const roofY = merlonY + 0.2
+  const roofR = dire ? 0.72 : 0.76
+  const roofH = dire ? 1.2 : 0.9
+  g.add(
+    ...ringOf(
+      4,
+      0.42,
+      () => new BoxGeometry(0.06, 0.24, 0.06),
+      mat(p.wood),
+      roofY - 0.1,
+      Math.PI / 4,
+    ),
+    part(oct(roofR + 0.02, roofR + 0.02, 0.07), mat(p.roofDark), 0, roofY),
+    part(new ConeGeometry(roofR, roofH, 8).rotateY(Math.PI / 8), mat(p.roof), 0, roofY + roofH / 2),
+    part(
+      new ConeGeometry(0.14, 0.26, 8).rotateY(Math.PI / 8),
+      mat(p.roofDark),
+      0,
+      roofY + roofH - 0.08,
+    ),
+    part(new CylinderGeometry(0.03, 0.03, 0.45, 4), mat(p.wood), 0, roofY + roofH + 0.15),
     part(
       new OctahedronGeometry(0.2).scale(1, 1.4, 1),
       mat(p.accent, { emissive: true, pulse: true }),
       0,
-      h + 2.05,
+      roofY + roofH + 0.5,
     ),
   )
+  if (dire) {
+    // Curved-looking horns sweeping out of the eaves.
+    for (let k = 0; k < 4; k++) {
+      const a = (k / 4) * Math.PI * 2 + Math.PI / 8
+      g.add(
+        horn(
+          mat(p.spike),
+          0.07,
+          0.5,
+          0.95,
+          a,
+          Math.sin(a) * 0.55,
+          roofY + 0.12,
+          Math.cos(a) * 0.55,
+        ),
+      )
+    }
+    g.add(horn(mat(p.spike), 0.05, 0.35, 0.5, 0, 0, roofY + roofH * 0.55, roofR * 0.45))
+  } else {
+    // Clean white trim ring under the eave.
+    g.add(part(oct(rTop + 0.05, rTop + 0.05, 0.05), mat(p.cloth), 0, yTop - 0.24))
+  }
   // Banner on higher tiers.
   if (tier >= 2) {
     g.add(
-      part(new CylinderGeometry(0.025, 0.025, 1, 4), mat(p.wood), 0.52, h + 1.05, 0),
+      part(new CylinderGeometry(0.025, 0.025, 1, 4), mat(p.wood), 0.82, yTop + 0.75, 0),
       part(
         new BoxGeometry(0.02, 0.34, 0.26),
         mat(p.accent, { emissive: true }),
-        0.53,
-        h + 1.35,
+        0.83,
+        yTop + 1.05,
         0.14,
       ),
     )
@@ -124,31 +444,39 @@ const tower = (p: Palette, tier: number) => {
   return g
 }
 
+/** The Ancient's crystals glow at 60% so its bloom does not swamp the base. */
+const ANCIENT_GLOW = 0.6
+
 const ancient = (p: Palette) => {
   const g = new Group()
   g.add(
-    // Three-tier stepped dais.
-    part(new CylinderGeometry(2.4, 2.6, 0.3, 12), mat(p.stoneDark), 0, 0.15),
+    // Three-tier stepped dais, the lowest sunk into the ground.
+    part(new CylinderGeometry(2.4, 2.6, 0.45, 12), mat(p.stoneDark), 0, 0.075),
     part(new CylinderGeometry(2.0, 2.2, 0.3, 12), mat(p.stone), 0, 0.45),
     part(new CylinderGeometry(1.5, 1.7, 0.35, 12), mat(p.stone), 0, 0.77),
     part(new CylinderGeometry(1.0, 1.2, 0.5, 8), mat(p.stoneDark), 0, 1.2),
     // Floating crystal with a smaller twin and orbit rings.
     part(
       new OctahedronGeometry(0.95).scale(1, 1.9, 1),
-      mat(p.accent, { emissive: true, pulse: true }),
+      mat(p.accent, { emissive: true, pulse: true, glow: ANCIENT_GLOW }),
       0,
       3.1,
     ),
-    part(new OctahedronGeometry(0.3).scale(1, 1.6, 1), mat(p.accent, { emissive: true }), 0, 1.75),
+    part(
+      new OctahedronGeometry(0.3).scale(1, 1.6, 1),
+      mat(p.accent, { emissive: true, glow: ANCIENT_GLOW }),
+      0,
+      1.75,
+    ),
     part(
       new TorusGeometry(1.35, 0.06, 6, 32).rotateX(Math.PI / 2),
-      mat(p.accent, { emissive: true }),
+      mat(p.accent, { emissive: true, glow: ANCIENT_GLOW }),
       0,
       2.6,
     ),
     part(
       new TorusGeometry(1.05, 0.05, 6, 32).rotateX(Math.PI / 2 + 0.35),
-      mat(p.accent, { emissive: true }),
+      mat(p.accent, { emissive: true, glow: ANCIENT_GLOW }),
       0,
       3.4,
     ),
@@ -164,45 +492,160 @@ const ancient = (p: Palette) => {
       part(new CylinderGeometry(0.14, 0.24, 2, 4).rotateY(Math.PI / 4), mat(p.stone), x, 1.6, z),
       part(new OctahedronGeometry(0.11), mat(p.accent, { emissive: true }), x, 2.7, z),
     )
+    if (p === TEAM.dire) {
+      g.add(horn(mat(p.spike), 0.06, 0.4, 0.6, Math.atan2(x, z), x * 1.06, 2.1, z * 1.06))
+    }
   }
   return g
 }
 
-const barracks = (p: Palette, ranged: boolean) => {
+const barracks = (p: Palette, ranged: boolean, dire: boolean) => {
   const g = new Group()
   const w = ranged ? 1.7 : 2.1
   const d = w * 0.75
   const wallH = 0.95
+  const base = 0.2
+  const top = base + wallH
+  const roofH = dire ? 0.98 : 0.72
+  const over = 0.08
   g.add(
-    // Stone plinth, timber walls, corner posts.
-    part(new BoxGeometry(w + 0.2, 0.2, d + 0.2), mat(p.stoneDark), 0, 0.1),
-    part(new BoxGeometry(w, wallH, d), mat(p.stone), 0, 0.2 + wallH / 2),
-    ...[-1, 1].flatMap((sx) =>
-      [-1, 1].map((sz) =>
+    // Stone plinth sunk 0.15 into the ground, 0.1 proud of the walls.
+    part(new BoxGeometry(w + 0.2, base + 0.15, d + 0.2), mat(p.stoneDark), 0, (base - 0.15) / 2),
+    // Stone sill course, plastered walls above.
+    part(new BoxGeometry(w + 0.03, 0.26, d + 0.03), mat(p.stone), 0, base + 0.13),
+    part(new BoxGeometry(w, wallH, d), mat(p.plaster), 0, base + wallH / 2),
+    // Gable ends + roof slab + dark ridge cap.
+    part(gableWall(w, d, roofH), mat(p.plaster), 0, top),
+    part(roofSlab(w, d, roofH, over), mat(p.roof), 0, top),
+    part(
+      new BoxGeometry(w + over * 2 + 0.06, 0.12, 0.12).rotateX(Math.PI / 4),
+      mat(p.roofDark),
+      0,
+      top + roofH + 0.08,
+    ),
+  )
+  // Timber framing: corner posts, wall plate, studs, and barge boards.
+  const timber = mat(p.wood)
+  for (const sx of [-1, 1])
+    for (const sz of [-1, 1])
+      g.add(
         part(
-          new BoxGeometry(0.12, wallH + 0.05, 0.12),
-          mat(p.wood),
+          new BoxGeometry(0.12, wallH, 0.12),
+          timber,
           (sx * w) / 2,
-          0.2 + wallH / 2,
+          base + wallH / 2,
           (sz * d) / 2,
         ),
-      ),
-    ),
-    part(new BoxGeometry(w + 0.04, 0.08, d + 0.04), mat(p.wood), 0, 0.2 + wallH, 0),
-    // Gabled roof: a long triangular prism.
-    part(gable(w + 0.3, d + 0.35, 0.75), mat(p.roof), 0, 0.2 + wallH, 0),
-    part(new BoxGeometry(w + 0.34, 0.06, 0.08), mat(p.roofDark), 0, 0.2 + wallH + 0.76, 0),
-    // Door + two warm windows on the front, one on each side.
-    part(new BoxGeometry(0.36, 0.55, 0.06), mat(p.wood), 0, 0.48, d / 2 + 0.02),
-    part(new BoxGeometry(0.22, 0.2, 0.05), windowMat, -w * 0.3, 0.75, d / 2 + 0.02),
-    part(new BoxGeometry(0.22, 0.2, 0.05), windowMat, w * 0.3, 0.75, d / 2 + 0.02),
-    part(new BoxGeometry(0.05, 0.2, 0.22), windowMat, w / 2 + 0.02, 0.75, 0),
-    // Chimney.
-    part(new BoxGeometry(0.2, 0.5, 0.2), mat(p.stoneDark), w * 0.28, 0.2 + wallH + 0.55, -d * 0.15),
+      )
+  g.add(
+    part(new BoxGeometry(w + 0.06, 0.09, d + 0.06), timber, 0, top - 0.02, 0),
+    part(new BoxGeometry(w + 0.04, 0.06, d + 0.04), timber, 0, base + 0.29, 0),
   )
+  for (const sz of [-1, 1])
+    for (const x of [-w * 0.16, w * 0.16])
+      g.add(
+        part(
+          new BoxGeometry(0.07, wallH - 0.1, 0.03),
+          timber,
+          x,
+          base + wallH / 2 + 0.05,
+          (sz * d) / 2 + 0.012,
+        ),
+      )
+  for (const sx of [-1, 1]) {
+    for (const z of [-d * 0.28, d * 0.28])
+      g.add(
+        part(
+          new BoxGeometry(0.03, wallH - 0.1, 0.07),
+          timber,
+          (sx * w) / 2 + 0.012,
+          base + wallH / 2 + 0.05,
+          z,
+        ),
+      )
+    // King post on each gable end.
+    g.add(
+      part(
+        new BoxGeometry(0.03, roofH * 0.8, 0.07),
+        timber,
+        (sx * w) / 2 + 0.012,
+        top + roofH * 0.4,
+        0,
+      ),
+    )
+  }
+  // Recessed door with stone surround and step, framed windows.
+  const door = opening(0.38, 0.56, mat(p.wood), mat(p.stoneDark))
+  g.add(
+    onFace(door, 0, d / 2, 0, base + 0.3),
+    part(new BoxGeometry(0.6, 0.08, 0.22), mat(p.stoneDark), 0, base - 0.02, d / 2 + 0.14),
+  )
+  const win = () => opening(0.24, 0.22, windowMat, timber, timber)
+  g.add(
+    onFace(win(), 0, d / 2, -w * 0.32, base + 0.6),
+    onFace(win(), 0, d / 2, w * 0.32, base + 0.6),
+    onFace(win(), 1, w / 2, 0, base + 0.6),
+    onFace(win(), 3, w / 2, 0, base + 0.6),
+    onFace(win(), 2, d / 2, 0, base + 0.6),
+  )
+  // Chimney with a dark cap.
+  g.add(
+    part(
+      new BoxGeometry(0.22, 0.75, 0.22),
+      mat(p.stoneDark),
+      w * 0.3,
+      top + roofH * 0.55,
+      -d * 0.18,
+    ),
+    part(
+      new BoxGeometry(0.28, 0.06, 0.28),
+      mat(p.roofDark),
+      w * 0.3,
+      top + roofH * 0.55 + 0.4,
+      -d * 0.18,
+    ),
+  )
+  if (dire) {
+    // Horns on the gable peaks and a row of ridge spikes.
+    for (const sx of [-1, 1]) {
+      g.add(
+        horn(
+          mat(p.spike),
+          0.06,
+          0.42,
+          0.6,
+          (sx * Math.PI) / 2,
+          sx * (w / 2 + over),
+          top + roofH,
+          0,
+        ),
+      )
+    }
+    for (const x of [-w * 0.2, w * 0.05])
+      g.add(part(new ConeGeometry(0.05, 0.24, 4), mat(p.spike), x, top + roofH + 0.24, 0))
+  } else {
+    // Small accent finials on the ridge ends.
+    for (const sx of [-1, 1])
+      g.add(
+        part(
+          new OctahedronGeometry(0.07).scale(1, 1.5, 1),
+          mat(p.accent, { emissive: true }),
+          sx * (w / 2 + over),
+          top + roofH + 0.22,
+          0,
+        ),
+      )
+  }
   if (ranged) {
     // Archery target outside.
     g.add(
+      part(
+        new BoxGeometry(0.05, 0.55, 0.05).rotateX(-0.25),
+        timber,
+        w / 2 + 0.45,
+        0.27,
+        d * 0.2 - 0.12,
+      ),
       part(
         new CylinderGeometry(0.22, 0.22, 0.06, 12).rotateX(Math.PI / 2),
         mat(p.cloth),
@@ -219,8 +662,12 @@ const barracks = (p: Palette, ranged: boolean) => {
       ),
     )
   } else {
-    // Weapon rack: two crossed posts.
-    g.add(part(new BoxGeometry(0.5, 0.06, 0.06), mat(p.wood), w / 2 + 0.4, 0.45, 0))
+    // Weapon rack: two posts and a crossbar.
+    g.add(
+      part(new BoxGeometry(0.06, 0.5, 0.06), timber, w / 2 + 0.4, 0.25, -0.25),
+      part(new BoxGeometry(0.06, 0.5, 0.06), timber, w / 2 + 0.4, 0.25, 0.25),
+      part(new BoxGeometry(0.06, 0.06, 0.6), timber, w / 2 + 0.4, 0.45, 0),
+    )
   }
   return g
 }
@@ -228,7 +675,7 @@ const barracks = (p: Palette, ranged: boolean) => {
 const fountain = (p: Palette) => {
   const g = new Group()
   g.add(
-    part(new CylinderGeometry(1.9, 2.0, 0.3, 16), mat(p.stoneDark), 0, 0.15),
+    part(new CylinderGeometry(1.9, 2.0, 0.45, 16), mat(p.stoneDark), 0, 0.075),
     part(new CylinderGeometry(1.75, 1.75, 0.08, 16), mat(p.stone), 0, 0.34),
     part(
       new CylinderGeometry(1.55, 1.55, 0.1, 16),
@@ -248,7 +695,8 @@ const fountain = (p: Palette) => {
 const shop = (p: Palette) => {
   const g = new Group()
   g.add(
-    // Market stall: counter, posts, striped awning, goods.
+    // Stone pad, market stall: counter, posts, striped awning, goods.
+    part(new BoxGeometry(1.8, 0.22, 1.2), mat(p.stoneDark), 0, -0.04, 0.1),
     part(new BoxGeometry(1.5, 0.6, 0.7), mat(p.wood), 0, 0.3, 0.1),
     part(new BoxGeometry(1.56, 0.06, 0.76), mat(0xb08a5a), 0, 0.62, 0.1),
     ...[-0.72, 0.72].flatMap((x) =>
@@ -267,17 +715,29 @@ const shop = (p: Palette) => {
   return g
 }
 
-const structure = (s: Structure, y: number, centre: number) => {
+/** Contact-shadow footprint (radii in local X/Z) per structure kind. */
+const STRUCTURE_BLOB: Record<Structure["kind"], readonly [number, number]> = {
+  tower: [1.3, 1.3],
+  ancient: [3.1, 3.1],
+  "barracks-melee": [1.6, 1.3],
+  "barracks-ranged": [1.35, 1.1],
+  fountain: [2.4, 2.4],
+  shop: [1.3, 1.0],
+  "secret-shop": [1.3, 1.0],
+}
+
+const structure = (s: Structure, y: number, centre: number, index: number) => {
   const p = TEAM[s.team]
+  const dire = s.team === "dire"
   const g =
     s.kind === "tower"
-      ? tower(p, s.tier ?? 1)
+      ? tower(p, s.tier ?? 1, dire, index * 977 + 13)
       : s.kind === "ancient"
         ? ancient(p)
         : s.kind === "barracks-melee"
-          ? barracks(p, false)
+          ? barracks(p, false, dire)
           : s.kind === "barracks-ranged"
-            ? barracks(p, true)
+            ? barracks(p, true, dire)
             : s.kind === "fountain"
               ? fountain(p)
               : shop(p)
@@ -342,69 +802,173 @@ const camp = (c: Camp, y: number) => {
   return g
 }
 
-const landmark = (l: Landmark, y: number) => {
+/** A long bone with knobbly ends, lying flat at yaw `a`. */
+const bone = (len: number, a: number, x: number, z: number) => {
   const g = new Group()
-  if (l.kind === "roshan") {
-    // Rocky lair: dark floor, ring of jagged spires open toward the river, glowing aegis plinth.
-    g.add(part(new CylinderGeometry(2.3, 2.7, 0.3, 12), mat(0x4e4a46), 0, -0.05))
-    g.add(part(new CylinderGeometry(1.6, 1.9, 0.12, 12), mat(0x3a3634), 0, 0.12))
-    for (let k = 0; k < 9; k++) {
-      const a = (k / 9) * Math.PI * 1.55 + 0.95
-      const h = 1.4 + ((k * 7) % 4) * 0.45
-      const spire = part(
-        new ConeGeometry(0.42, h, 5),
-        mat(k % 2 ? 0x6a6460 : 0x5a5450),
-        Math.cos(a) * 2.3,
-        h / 2 - 0.05,
-        Math.sin(a) * 2.3,
-      )
-      spire.rotation.set(Math.sin(a) * 0.2, a, Math.cos(a) * -0.2)
-      g.add(spire)
-    }
+  g.add(
+    part(new CylinderGeometry(0.04, 0.04, len, 5).rotateZ(Math.PI / 2), mat(BONE), 0, 0, 0),
+    part(new IcosahedronGeometry(0.07, 0), mat(BONE), -len / 2, 0, 0),
+    part(new IcosahedronGeometry(0.07, 0), mat(BONE), len / 2, 0, 0),
+  )
+  g.rotation.y = a
+  g.position.set(x, 0.1, z)
+  return g
+}
+
+/**
+ * Roshan's lair: a sunken crater ringed by mossy boulders, a stacked-rock arch
+ * whose mouth faces local +z (the river), bones, and the glowing aegis.
+ */
+const roshanLair = () => {
+  const g = new Group()
+  const rand = rng(0x705a)
+  // Crater berm (lathe profile: sunken centre, raised rim, skirt into the ground).
+  const profile = [
+    [1.7, 0.0],
+    [1.95, 0.22],
+    [2.4, 0.34],
+    [2.9, 0.16],
+    [3.15, -0.15],
+  ].map(([r, y]) => new Vector2(r, y))
+  g.add(
+    part(new LatheGeometry(profile, 16), mat(ROCK.earth)),
+    part(new CircleGeometry(1.75, 16).rotateX(-Math.PI / 2), mat(ROCK.floor), 0, 0.01),
+  )
+  // Rim boulders, open toward +z for the cave mouth; taller at the back.
+  const mouth = Math.PI / 2
+  const gap = 0.55
+  const rim = 13
+  for (let k = 0; k < rim; k++) {
+    const a = mouth + gap + (k / (rim - 1)) * (Math.PI * 2 - gap * 2) + (rand() - 0.5) * 0.15
+    const back = (1 - Math.sin(a)) / 2
+    const r = 0.42 + rand() * 0.22
+    const rr = 2.2 + (rand() - 0.5) * 0.3
     g.add(
-      part(new CylinderGeometry(0.35, 0.45, 0.4, 6), mat(0x8a8478), 0, 0.35),
-      part(
-        new IcosahedronGeometry(0.42, 0),
-        mat(0xb07cff, { emissive: true, pulse: true }),
-        0,
-        1.0,
-      ),
-      // Bones scattered around.
-      part(
-        new CylinderGeometry(0.05, 0.05, 0.6, 5).rotateZ(Math.PI / 2).rotateY(0.7),
-        mat(0xe8e0cc),
-        0.9,
-        0.2,
-        0.5,
-      ),
-      part(
-        new CylinderGeometry(0.05, 0.05, 0.5, 5).rotateZ(Math.PI / 2).rotateY(-0.4),
-        mat(0xe8e0cc),
-        -0.7,
-        0.2,
-        0.8,
-      ),
-      part(new IcosahedronGeometry(0.14, 0), mat(0xe8e0cc), -0.4, 0.22, 1.1),
-    )
-  } else {
-    // Rune: stone disc with carved ring, hovering crystal.
-    g.add(
-      part(new CylinderGeometry(0.7, 0.78, 0.12, 12), mat(0xa89c86), 0, 0.06),
-      part(
-        new TorusGeometry(0.5, 0.04, 4, 20).rotateX(Math.PI / 2),
-        mat(0x56d6ff, { emissive: true }),
-        0,
-        0.13,
-      ),
-      part(
-        new OctahedronGeometry(0.26).scale(1, 1.4, 1),
-        mat(0x56d6ff, { emissive: true, pulse: true }),
-        0,
-        0.95,
+      ...boulder(
+        rand,
+        r,
+        Math.cos(a) * rr,
+        0.2 + r * 0.4 * (1 + back),
+        Math.sin(a) * rr,
+        0.9 + rand() * 0.4,
+        0.8 + back * 0.9 + rand() * 0.3,
+        0.9 + rand() * 0.4,
+        rand() < 0.65,
       ),
     )
   }
+  // Outer scatter of smaller rocks.
+  for (let k = 0; k < 9; k++) {
+    const a = mouth + 0.8 + (k / 8) * (Math.PI * 2 - 1.6) + (rand() - 0.5) * 0.3
+    const r = 0.22 + rand() * 0.16
+    const rr = 2.85 + rand() * 0.3
+    g.add(
+      ...boulder(
+        rand,
+        r,
+        Math.cos(a) * rr,
+        0.05,
+        Math.sin(a) * rr,
+        1.1,
+        0.7 + rand() * 0.4,
+        1,
+        rand() < 0.5,
+      ),
+    )
+  }
+  // Arched cave mouth: two stacked-rock pillars and a lintel facing the river.
+  const mz = 2.25
+  for (const sx of [-1, 1]) {
+    const x = sx * 0.95
+    g.add(
+      ...boulder(rand, 0.44, x, 0.32, mz, 1, 0.9, 1, false),
+      ...boulder(rand, 0.36, x - sx * 0.04, 0.88, mz + 0.03, 1, 0.95, 1, false),
+      ...boulder(rand, 0.3, x - sx * 0.12, 1.32, mz, 1, 0.9, 1, rand() < 0.5),
+    )
+  }
+  g.add(
+    ...boulder(rand, 0.4, -0.38, 1.66, mz, 1.5, 0.62, 1.1, true),
+    ...boulder(rand, 0.4, 0.4, 1.68, mz + 0.02, 1.5, 0.58, 1.1, true),
+    ...boulder(rand, 0.26, 0.02, 1.98, mz - 0.05, 1.2, 0.8, 1, true),
+  )
+  // Bones: femurs, a little ribcage and a horned skull.
+  g.add(bone(0.6, 0.7, 0.9, 0.55), bone(0.5, -0.4, -0.75, 0.85), bone(0.45, 1.9, 0.3, -1.0))
+  for (let k = 0; k < 3; k++) {
+    g.add(
+      part(
+        new TorusGeometry(0.22 - k * 0.03, 0.025, 4, 8, Math.PI).rotateY(Math.PI / 2 + 0.2),
+        mat(BONE),
+        -0.95 + k * 0.14,
+        0.02,
+        -0.35 - k * 0.05,
+      ),
+    )
+  }
+  const skull = part(new IcosahedronGeometry(0.17, 0), mat(BONE), -0.35, 0.13, 1.15)
+  skull.scale.set(1, 0.85, 1.2)
+  g.add(
+    skull,
+    horn(mat(BONE), 0.04, 0.18, 0.9, -1.2, -0.48, 0.2, 1.12),
+    horn(mat(BONE), 0.04, 0.18, 0.9, 1.2, -0.22, 0.2, 1.12),
+  )
+  // Aegis on a pedestal of stacked stones.
+  g.add(
+    ...boulder(rand, 0.38, 0, 0.18, 0, 1.2, 0.6, 1.2, true),
+    part(new CylinderGeometry(0.22, 0.3, 0.32, 6), mat(ROCK.light), 0, 0.5),
+    part(new IcosahedronGeometry(0.42, 0), mat(0xb07cff, { emissive: true, pulse: true }), 0, 1.1),
+  )
+  return g
+}
+
+const rune = () => {
+  const g = new Group()
+  // Stone disc with carved ring, hovering crystal.
+  g.add(
+    part(new CylinderGeometry(0.7, 0.78, 0.22, 12), mat(0xa89c86), 0, 0.01),
+    part(
+      new TorusGeometry(0.5, 0.04, 4, 20).rotateX(Math.PI / 2),
+      mat(0x56d6ff, { emissive: true }),
+      0,
+      0.13,
+    ),
+    part(
+      new OctahedronGeometry(0.26).scale(1, 1.4, 1),
+      mat(0x56d6ff, { emissive: true, pulse: true }),
+      0,
+      0.95,
+    ),
+  )
+  return g
+}
+
+/** Nearest point on a polyline. */
+const nearestOnPath = (p: Vec2, path: readonly Vec2[]): Vec2 => {
+  let best = path[0] ?? p
+  let bestD = Infinity
+  for (let i = 0; i + 1 < path.length; i++) {
+    const a = path[i]!
+    const b = path[i + 1]!
+    const dx = b.x - a.x
+    const dz = b.z - a.z
+    const len2 = dx * dx + dz * dz || 1
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2))
+    const q = { x: a.x + dx * t, z: a.z + dz * t }
+    const d = Math.hypot(q.x - p.x, q.z - p.z)
+    if (d < bestD) {
+      bestD = d
+      best = q
+    }
+  }
+  return best
+}
+
+const landmark = (l: Landmark, y: number, river: readonly Vec2[]) => {
+  const g = l.kind === "roshan" ? roshanLair() : rune()
   g.position.set(l.position.x, y, l.position.z)
+  if (l.kind === "roshan") {
+    const q = nearestOnPath(l.position, river)
+    g.rotation.y = Math.atan2(q.x - l.position.x, q.z - l.position.z)
+  }
   g.name = l.id
   g.userData = { kind: l.kind, team: "neutral", id: l.id }
   return g
@@ -447,12 +1011,25 @@ const proxyMaterial = new MeshBasicNodeMaterial()
 /** All buildings, camps and landmarks: merged visuals + named, pickable proxies. */
 export const buildStructures = (map: MobaMap): { visuals: Group; pickables: Group } => {
   const source = new Group()
+  const blobs: Blob[] = []
   const ground = (x: number, z: number) => map.heightAt(x, z)
-  for (const s of map.structures)
-    source.add(structure(s, ground(s.position.x, s.position.z), map.size / 2))
-  for (const c of map.camps) source.add(camp(c, ground(c.position.x, c.position.z)))
-  for (const l of map.landmarks)
-    source.add(landmark(l, Math.max(map.waterLevel, ground(l.position.x, l.position.z))))
+  map.structures.forEach((s, i) => {
+    const g = structure(s, ground(s.position.x, s.position.z), map.size / 2, i)
+    source.add(g)
+    const [rx, rz] = STRUCTURE_BLOB[s.kind]
+    blobs.push({ ...g.position, rx, rz, rot: g.rotation.y, strength: 1 })
+  })
+  for (const c of map.camps) {
+    const g = camp(c, ground(c.position.x, c.position.z))
+    source.add(g)
+    blobs.push({ ...g.position, rx: 1.7, rz: 1.7, rot: 0, strength: 0.7 })
+  }
+  for (const l of map.landmarks) {
+    const g = landmark(l, Math.max(map.waterLevel, ground(l.position.x, l.position.z)), map.river)
+    source.add(g)
+    const r = l.kind === "roshan" ? 3.4 : 0.95
+    blobs.push({ ...g.position, rx: r, rz: r, rot: 0, strength: l.kind === "roshan" ? 0.8 : 1 })
+  }
 
   const pickables = new Group()
   pickables.name = "pickables"
@@ -473,6 +1050,7 @@ export const buildStructures = (map: MobaMap): { visuals: Group; pickables: Grou
   }
 
   const visuals = bake(source)
+  visuals.add(buildBlobs(blobs))
   visuals.name = "structures"
   source.traverse((o) => {
     if (o instanceof Mesh) o.geometry.dispose()
@@ -480,13 +1058,21 @@ export const buildStructures = (map: MobaMap): { visuals: Group; pickables: Grou
   return { visuals, pickables }
 }
 
-/** Pulsing ground ring that marks the selected entity. */
+/**
+ * Soft ground ring that marks the selected entity: a thin warm-white band at
+ * radius 1 plus a faint outer halo, gently breathing. Radius is 1 before scale.
+ */
 export const buildSelectionRing = () => {
   const m = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false })
-  m.colorNode = color(0xffffff)
-  m.opacityNode = sin(time.mul(4)).mul(0.25).add(0.7)
-  const ring = new Mesh(new TorusGeometry(1, 0.07, 6, 40).rotateX(Math.PI / 2), m)
+  const r = vec2(positionLocal.x, positionLocal.z).length()
+  const band = (centre: number, width: number) =>
+    float(1).sub(smoothstep(float(0), float(width), abs(r.sub(centre))))
+  const pulse = sin(time.mul(2.4)).mul(0.15).add(0.85)
+  m.colorNode = color(0xfff4d6)
+  m.opacityNode = band(1, 0.045).mul(0.55).add(band(1.13, 0.03).mul(0.18)).mul(pulse)
+  const ring = new Mesh(new RingGeometry(0.9, 1.2, 64, 1).rotateX(-Math.PI / 2), m)
   ring.visible = false
   ring.name = "selection-ring"
+  ring.renderOrder = 2
   return ring
 }

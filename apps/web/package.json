@@ -11,6 +11,7 @@
   "dependencies": {
     "@mobacraft/engine": "workspace:*",
     "@mobacraft/map": "workspace:*",
+    "@mobacraft/sim": "workspace:*",
     "@mobacraft/ui": "workspace:*",
     "effect": "^4.1.4",
     "lucide-react": "^1.73.0",

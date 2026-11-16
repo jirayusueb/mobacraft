@@ -16,7 +16,7 @@ import {
 import { useEffect, useMemo, useState } from "react"
 import { t } from "../strings.ts"
 import { HoverChip, SelectedCard } from "./entity-card.tsx"
-import { indexEntities } from "./entity.ts"
+import { creatureEntity, indexEntities } from "./entity.ts"
 import { HelpPopover } from "./help-popover.tsx"
 import { Minimap } from "./minimap.tsx"
 import { clock, PHASE_ICON, TitleBlock } from "./title-block.tsx"
@@ -85,11 +85,22 @@ export const Hud = ({
     return () => window.removeEventListener("keydown", onKey)
   })
 
-  const selected = usePresence(state.selected ? (entities.get(state.selected.id) ?? null) : null)
-  const hoveredEntity =
-    state.hovered && state.hovered.id !== state.selected?.id
-      ? (entities.get(state.hovered.id) ?? null)
-      : null
+  // Creature entities are built on demand; memoise per picked id so identity is
+  // stable across renders (usePresence compares by reference).
+  const sel = state.selected
+  const hov = state.hovered
+  const selectedEntity = useMemo(
+    () => (sel ? (entities.get(sel.id) ?? creatureEntity(sel)) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by id: picks are value objects
+    [entities, sel?.id],
+  )
+  const hoveredLookup = useMemo(
+    () => (hov ? (entities.get(hov.id) ?? creatureEntity(hov)) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by id: picks are value objects
+    [entities, hov?.id],
+  )
+  const selected = usePresence(selectedEntity)
+  const hoveredEntity = hov && hov.id !== sel?.id ? hoveredLookup : null
   const PhaseIcon = PHASE_ICON[state.phase]
   const ancient = (team: "radiant" | "dire") =>
     map.structures.find((s) => s.kind === "ancient" && s.team === team)?.id ?? null
