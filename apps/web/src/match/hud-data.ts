@@ -110,61 +110,68 @@ const MULTI_TITLE: Record<number, string> = {
   5: ANNOUNCER["rampage"]!,
 }
 
-export interface AnnouncerTracker {
-  seen: number
-  nextId: number
-  /** playerId → recent kill times (game seconds). */
-  streaks: Map<string, number[]>
-  wiped: Record<DraftSide, boolean>
-  ancientHp: Record<DraftSide, number>
-  ancientWarnedAt: Record<DraftSide, number>
-}
-
-export const createTracker = (): AnnouncerTracker => ({
-  seen: 0,
-  nextId: 1,
-  streaks: new Map(),
-  wiped: { blue: false, red: false },
-  ancientHp: { blue: 1, red: 1 },
-  ancientWarnedAt: { blue: -999, red: -999 },
-})
-
 const label = (h: HeroLine | undefined) => (h ? `${h.playerName} · ${h.heroName}` : "")
 
-/**
- * Advance the tracker to `snap` and return any new banners.
- * `ancientHp` is each side's own Ancient health (0..1) from the renderer seam.
- * `teamName` names a side for copy ("Lantern Ward").
- */
-export const announce = (
-  tr: AnnouncerTracker,
-  snap: MatchSnapshot,
-  ancientHp: Readonly<Record<DraftSide, number>>,
-  teamName: (s: DraftSide) => string,
-): Banner[] => {
-  const out: Banner[] = []
-  const add = (b: Omit<Banner, "id">) => out.push({ ...b, id: tr.nextId++ })
-  const fresh = snap.feed.slice(tr.seen)
-  tr.seen = snap.feed.length
+const SIDES = ["blue", "red"] as const
+const ANCIENT_WARN_COOLDOWN = 45
 
-  for (const f of fresh) {
+type TeamName = (s: DraftSide) => string
+
+/**
+ * Turns the match feed and side health into announcer banners.
+ * Stateful: remembers which feed entries it has seen, kill streaks, wipes and
+ * the last Ancient warning so each moment is announced once.
+ */
+export class AnnouncerTracker {
+  #seen = 0
+  #nextId = 1
+  /** playerId → recent kill times (game seconds). */
+  readonly #streaks = new Map<string, number[]>()
+  readonly #wiped: Record<DraftSide, boolean> = { blue: false, red: false }
+  readonly #ancientHp: Record<DraftSide, number> = { blue: 1, red: 1 }
+  readonly #ancientWarnedAt: Record<DraftSide, number> = { blue: -999, red: -999 }
+  #out: Banner[] = []
+
+  /**
+   * Advance to `snap` and return any new banners.
+   * `ancientHp` is each side's own Ancient health (0..1) from the renderer seam.
+   * `teamName` names a side for copy ("Lantern Ward").
+   */
+  announce(
+    snap: MatchSnapshot,
+    ancientHp: Readonly<Record<DraftSide, number>>,
+    teamName: TeamName,
+  ): Banner[] {
+    this.#out = []
+    const fresh = snap.feed.slice(this.#seen)
+    this.#seen = snap.feed.length
+    for (const f of fresh) this.#feedEntry(f, snap, teamName)
+    this.#checkWipes(snap, teamName)
+    this.#checkAncients(snap, ancientHp, teamName)
+    return this.#out
+  }
+
+  #add(b: Omit<Banner, "id">): void {
+    this.#out.push({ ...b, id: this.#nextId++ })
+  }
+
+  /** Records a kill for `playerId` at time `t`; returns the current multi-kill streak. */
+  #streak(playerId: string, t: number): number {
+    const times = (this.#streaks.get(playerId) ?? []).filter((x) => t - x <= MULTI_WINDOW)
+    times.push(t)
+    this.#streaks.set(playerId, times)
+    return times.length
+  }
+
+  #feedEntry(f: FeedEntry, snap: MatchSnapshot, teamName: TeamName): void {
     const side = f.side
     switch (f.kind) {
       case "first-blood":
       case "kill": {
-        const k = parseKill(f, snap.heroes)
-        const killer = k?.killer
-        let streak = 1
-        if (killer) {
-          const times = (tr.streaks.get(killer.playerId) ?? []).filter(
-            (t) => f.t - t <= MULTI_WINDOW,
-          )
-          times.push(f.t)
-          tr.streaks.set(killer.playerId, times)
-          streak = times.length
-        }
+        const killer = parseKill(f, snap.heroes)?.killer
+        const streak = killer ? this.#streak(killer.playerId, f.t) : 1
         if (f.kind === "first-blood") {
-          add({
+          this.#add({
             kind: "first-blood",
             side,
             title: ANNOUNCER["first-blood"]!,
@@ -174,7 +181,7 @@ export const announce = (
           })
         }
         if (killer && streak >= 2) {
-          add({
+          this.#add({
             kind: "multi",
             side,
             title: MULTI_TITLE[Math.min(streak, 5)]!,
@@ -186,7 +193,7 @@ export const announce = (
         break
       }
       case "tower":
-        add({
+        this.#add({
           kind: "tower",
           side,
           title: ANNOUNCER["tower"]!,
@@ -195,7 +202,7 @@ export const announce = (
         })
         break
       case "rax":
-        add({
+        this.#add({
           kind: "rax",
           side,
           title: ANNOUNCER["rax"]!,
@@ -205,7 +212,7 @@ export const announce = (
         break
       case "roshan": {
         const carrier = aegisCarrier(f, snap.heroes)
-        add({
+        this.#add({
           kind: "roshan",
           side,
           title: ANNOUNCER["roshan"]!,
@@ -221,7 +228,7 @@ export const announce = (
       }
       case "aegis": {
         const h = parseAegis(f, snap.heroes)
-        add({
+        this.#add({
           kind: "aegis",
           side,
           title: ANNOUNCER["aegis"]!,
@@ -236,40 +243,48 @@ export const announce = (
     }
   }
 
-  // Team wipe: every hero of a side dead at once (fires once per wipe).
-  for (const s of ["blue", "red"] as const) {
-    const team = snap.heroes.filter((h) => h.side === s)
-    const allDead = team.length > 0 && team.every((h) => !h.alive)
-    if (allDead && !tr.wiped[s]) {
-      const other: DraftSide = s === "blue" ? "red" : "blue"
-      add({
-        kind: "wipe",
-        side: other,
-        title: ANNOUNCER["wipe"]!,
-        detail: `${teamName(other)} wipe ${teamName(s)}`,
-        priority: 8,
-      })
+  /** Team wipe: every hero of a side dead at once (fires once per wipe). */
+  #checkWipes(snap: MatchSnapshot, teamName: TeamName): void {
+    for (const s of SIDES) {
+      const team = snap.heroes.filter((h) => h.side === s)
+      const allDead = team.length > 0 && team.every((h) => !h.alive)
+      if (allDead && !this.#wiped[s]) {
+        const other = otherSide(s)
+        this.#add({
+          kind: "wipe",
+          side: other,
+          title: ANNOUNCER["wipe"]!,
+          detail: `${teamName(other)} wipe ${teamName(s)}`,
+          priority: 8,
+        })
+      }
+      this.#wiped[s] = allDead
     }
-    tr.wiped[s] = allDead
   }
 
-  // Ancient under attack: health dropped since the last sample; at most every 45 s.
-  for (const s of ["blue", "red"] as const) {
-    const hp = ancientHp[s]
-    if (hp < tr.ancientHp[s] - 0.0005 && !snap.winner && snap.time - tr.ancientWarnedAt[s] > 45) {
-      tr.ancientWarnedAt[s] = snap.time
-      add({
-        kind: "ancient",
-        side: s === "blue" ? "red" : "blue",
-        title: ANNOUNCER["ancient"]!,
-        detail: `${teamName(s)}'s Ancient at ${Math.round(hp * 100)}%`,
-        priority: 7,
-      })
+  /** Ancient under attack: health dropped since the last sample; rate-limited per side. */
+  #checkAncients(
+    snap: MatchSnapshot,
+    ancientHp: Readonly<Record<DraftSide, number>>,
+    teamName: TeamName,
+  ): void {
+    for (const s of SIDES) {
+      const hp = ancientHp[s]
+      const dropped = hp < this.#ancientHp[s] - 0.0005
+      const cooled = snap.time - this.#ancientWarnedAt[s] > ANCIENT_WARN_COOLDOWN
+      if (dropped && !snap.winner && cooled) {
+        this.#ancientWarnedAt[s] = snap.time
+        this.#add({
+          kind: "ancient",
+          side: otherSide(s),
+          title: ANNOUNCER["ancient"]!,
+          detail: `${teamName(s)}'s Ancient at ${Math.round(hp * 100)}%`,
+          priority: 7,
+        })
+      }
+      this.#ancientHp[s] = hp
     }
-    tr.ancientHp[s] = hp
   }
-
-  return out
 }
 
 // --- small formatting ----------------------------------------------------------------

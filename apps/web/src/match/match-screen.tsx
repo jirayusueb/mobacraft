@@ -14,7 +14,7 @@ import { Announcer, enqueue } from "./announcer.tsx"
 import { CALLS, CoachBar } from "./coach-bar.tsx"
 import type { FlowEvent } from "./flow.ts"
 import { HeroColumn } from "./hero-frame.tsx"
-import { type Banner, type GoldSample, announce, createTracker, pushSample } from "./hud-data.ts"
+import { AnnouncerTracker, type Banner, type GoldSample, pushSample } from "./hud-data.ts"
 import { KillFeed } from "./kill-feed.tsx"
 import { Scoreboard } from "./scoreboard.tsx"
 
@@ -43,7 +43,7 @@ export const MatchScreen = ({
   const [snap, setSnap] = useState<MatchSnapshot>(() => match.snapshot())
   const [banners, setBanners] = useState<readonly Banner[]>([])
   const history = useRef<GoldSample[]>([])
-  const tracker = useRef(createTracker())
+  const announcer = useRef(new AnnouncerTracker())
 
   // Each side's own Ancient (for "under attack" banners), resolved once from map data.
   const ancientIds = useMemo(() => {
@@ -57,7 +57,7 @@ export const MatchScreen = ({
     view.setPopulation(match)
     view.focus(map.size / 2, map.size / 2)
     history.current = []
-    tracker.current = createTracker()
+    announcer.current = new AnnouncerTracker()
     return () => view.setPopulation(null)
   }, [view, match, map])
 
@@ -69,8 +69,7 @@ export const MatchScreen = ({
       pushSample(history.current, s)
       const st = match.structures()
       const hp = (sid: string | undefined) => st.find((x) => x.id === sid)?.hp ?? 1
-      const fresh = announce(
-        tracker.current,
+      const fresh = announcer.current.announce(
         s,
         { blue: hp(ancientIds.blue), red: hp(ancientIds.red) },
         teamName,
