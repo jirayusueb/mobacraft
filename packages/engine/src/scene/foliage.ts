@@ -24,6 +24,7 @@ import {
   vec3,
 } from "three/tsl"
 import { CANOPY, PROP, TRUNK } from "../palette.ts"
+import { ScatterRng } from "./scatter-rng.ts"
 
 const dummy = new Object3D()
 const tmp = new Color()
@@ -71,11 +72,6 @@ const instanced = (
   return mesh
 }
 
-const prng = (seed: number) => {
-  let s = (seed * 2654435761) >>> 0
-  return () => (s = (Math.imul(s ^ (s >>> 15), 2246822519) + 1) >>> 0) / 4294967296
-}
-
 const lobeCount = (v: number) => (v > 0.45 ? 5 : 4)
 
 /** Lobe layout for a round tree: [dx, dy, dz, size] in units of tree scale. */
@@ -95,7 +91,7 @@ const LOBES: readonly (readonly [number, number, number, number])[] = [
 export const buildFoliage = (map: MobaMap): Group => {
   const group = new Group()
   group.name = "foliage"
-  const rnd = prng(map.spec.seed + 101)
+  const rnd = new ScatterRng(map.spec.seed + 101)
 
   // --- trees ----------------------------------------------------------------
   const trees = map.trees
@@ -241,18 +237,18 @@ export const buildFoliage = (map: MobaMap): Group => {
     return t === Terrain.Grass || t === Terrain.Shore
   }
   for (const p of byKind.flower) {
-    const n = 5 + Math.floor(rnd() * 8)
+    const n = 5 + Math.floor(rnd.next() * 8)
     const colors = PROP.flower
     const main = colors[Math.floor(p.variant * colors.length)]!
-    const alt = colors[Math.floor(rnd() * colors.length)]!
+    const alt = colors[Math.floor(rnd.next() * colors.length)]!
     const r = 0.5 + p.scale * 0.6
     for (let k = 0; k < n; k++) {
-      const a = rnd() * 6.283
-      const d = Math.sqrt(rnd()) * r
+      const a = rnd.next() * 6.283
+      const d = Math.sqrt(rnd.next()) * r
       const x = p.position.x + Math.cos(a) * d
       const z = p.position.z + Math.sin(a) * d
       if (!grassy(x, z)) continue
-      flowerPts.push({ x, z, s: 0.7 + rnd() * 0.6, c: rnd() < 0.75 ? main : alt })
+      flowerPts.push({ x, z, s: 0.7 + rnd.next() * 0.6, c: rnd.next() < 0.75 ? main : alt })
     }
   }
   const flowers = instanced(
@@ -290,11 +286,11 @@ export const buildFoliage = (map: MobaMap): Group => {
       const k = t === Terrain.Grass ? 5 : t === Terrain.Forest ? 3 : t === Terrain.Shore ? 2 : 0
       for (let j = 0; j < k; j++)
         tufts.push({
-          x: tx + rnd(),
-          z: tz + rnd(),
-          s: 0.5 + rnd() * 0.6,
-          h: 0.6 + rnd() * 1.1,
-          r: rnd(),
+          x: tx + rnd.next(),
+          z: tz + rnd.next(),
+          s: 0.5 + rnd.next() * 0.6,
+          h: 0.6 + rnd.next() * 1.1,
+          r: rnd.next(),
           team: map.side[tz * N + tx]!,
         })
     }

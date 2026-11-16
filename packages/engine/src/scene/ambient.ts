@@ -32,12 +32,7 @@ import {
   uniform,
   vec3,
 } from "three/tsl"
-
-/** Seeded PRNG, so ambient scatter is stable per map. */
-const prng = (seed: number) => {
-  let s = (seed * 2654435761) >>> 0
-  return () => (s = (Math.imul(s ^ (s >>> 15), 2246822519) + 1) >>> 0) / 4294967296
-}
+import { ScatterRng } from "./scatter-rng.ts"
 
 const ambientMesh = (
   geometry: BufferGeometry,
@@ -80,7 +75,7 @@ export const buildAmbient = (
   const group = new Group()
   group.name = "ambient"
   const N = map.size
-  const rnd = prng(map.spec.seed + 7)
+  const rnd = new ScatterRng(map.spec.seed + 7)
   const night = uniform(0)
 
   // --- birds -------------------------------------------------------------------
@@ -149,10 +144,10 @@ export const buildAmbient = (
       const byForest = near(tx, tz, Terrain.Forest)
       const byWater = t === Terrain.Shore || near(tx, tz, Terrain.Water)
       if (!byForest && !byWater) continue
-      if (rnd() > (byWater ? 0.18 : 0.07)) continue
-      const x = tx + rnd()
-      const z = tz + rnd()
-      spots.push(x, map.heightAt(x, z) + 0.3 + rnd() * 0.9, z)
+      if (rnd.next() > (byWater ? 0.18 : 0.07)) continue
+      const x = tx + rnd.next()
+      const z = tz + rnd.next()
+      spots.push(x, map.heightAt(x, z) + 0.3 + rnd.next() * 0.9, z)
     }
   const fireflyCount = Math.max(1, Math.min(900, spots.length / 3))
   const base = instancedBufferAttribute(
