@@ -1897,7 +1897,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           {
             id: e.id,
             pos: { x: e.x, z: e.z },
-            vel: { x: 0, z: 0 },
+            // heading = atan2(dx, dz) → direction of travel for "guess where he went".
+            vel: { x: Math.sin(e.heading) * e.speed, z: Math.cos(e.heading) * e.speed },
             hpFrac: e.hp / Math.max(1, e.maxHp),
             level: e.hero!.level,
             items: e.hero!.items,

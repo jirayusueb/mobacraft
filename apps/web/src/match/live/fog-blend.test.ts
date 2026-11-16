@@ -31,7 +31,8 @@ describe("fog blend (spec/08 §5)", () => {
   test("k = 1 snaps for reduced motion", () => {
     const light = new Float32Array([1, 1])
     expect(blendFog(light, new Uint8Array([0, 1]), 1)).toBe(false)
-    expect([...light]).toEqual([0, targetLight(1)])
+    expect(light[0]).toBe(0)
+    expect(light[1]).toBeCloseTo(targetLight(1), 5) // Float32 storage
   })
 
   test("paint writes the colour ramp into RGBA", () => {

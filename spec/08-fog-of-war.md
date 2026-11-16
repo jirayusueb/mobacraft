@@ -234,3 +234,15 @@ through linger (b) instead of vanishing cells instantly.
   kept explicit with feed/spectator events declared out of scope (§3).
   Attack reveal is kept deliberately (test 4) with the accepted balance
   shift noted here. Verdict: **PASS** to implementation.
+- Implementation: **PASS** — `fog.ts` (shadowcasting with separate tree and
+  height-shadow block modes, day/night, linger, reveals, tree cut/regrow),
+  `knowledge.ts` (TeamKnowledge + ghosts with heading×speed velocity),
+  `match.ts` wiring (AI enemy reads via knowledge; targeting keeps the 3-tile
+  collision rule), mini-map fog layer at 20 Hz. Evidence: fog/knowledge tests
+  (fixtures + real-match isolation), fog-blend tests, full `bun run test`
+  green, browser capture of the mini map mid-match.
+- Known gaps (next spec): the partial dirty-region pass is implemented as
+  "force a full recompute next tick" (byte-identical by construction; full
+  pass costs ~1–3 ms for 100+ sources, inside the budget); invisibility/True
+  Sight consumers and per-hero `nightVision` data are not populated; the
+  diorama (WebGPU) fog pass is still deferred.
