@@ -368,6 +368,3 @@ export class FxDraw {
     if (b.param) b.param.array[i] = param
   }
 }
-
-/** @deprecated Prefer `new FxDraw()`. */
-export const createFxDraw = (): FxDraw => new FxDraw()
