@@ -2,7 +2,7 @@ import { MAX_LEVEL, RESPAWN_BASE, RESPAWN_PER_LEVEL } from "@mobacraft/sim"
 /** Hero frames — one compact card per hero down each side of the screen. */
 import { type HeroLine, MAX_ITEMS, itemById } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
-import { Coins, Skull } from "lucide-react"
+import { Coins, Crown, Skull } from "lucide-react"
 import { INTENT_LABEL } from "../strings.ts"
 import { goldK } from "./hud-data.ts"
 import { ItemSlot } from "./item-icon.tsx"
@@ -22,6 +22,9 @@ const INTENT_TONE: Record<string, string> = {
   roshan: "bg-violet-400/20 text-violet-200",
   group: "bg-emerald-300/15 text-emerald-200",
   jungle: "bg-lime-300/10 text-lime-200/85",
+  gank: "bg-rose-300/15 text-rose-100",
+  ward: "bg-amber-200/15 text-amber-100",
+  shop: "bg-cyan-300/15 text-cyan-100",
   lane: "bg-white/[0.07] text-white/60",
 }
 
@@ -110,7 +113,9 @@ const HeroFrame = ({
           : `${Math.round(h.hp * 100)}% health, ${INTENT_LABEL[h.intent] ?? h.intent}`,
         ult ? "ultimate unlocked" : "",
         h.aegis ? "holds the Aegis" : "",
-        `${goldK(h.gold)} gold earned`,
+        h.igl ? "in-game leader" : "",
+        h.following === false ? "freelancing, ignoring the current call" : "",
+        `${goldK(h.netWorth ?? h.gold)} net worth`,
         inv ? `items: ${inv}` : "no items",
       ]
         .filter(Boolean)
@@ -119,9 +124,21 @@ const HeroFrame = ({
       <LevelRing heroId={h.heroId} level={h.level} dead={dead} side={side} />
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
+          {h.igl ? (
+            <Crown className="size-3 shrink-0 fill-amber-300/40 text-amber-300" aria-hidden />
+          ) : null}
           <span className={cn("truncate text-[12px] font-semibold", dead && "text-white/50")}>
             {h.playerName}
           </span>
+          {h.following === false && !dead ? (
+            <span
+              className="rounded-[4px] border border-dashed border-white/35 px-1 text-[8.5px] leading-[12px] font-semibold tracking-wider text-white/70 italic"
+              title="Freelancing — ignoring the current call"
+              aria-hidden
+            >
+              FREE
+            </span>
+          ) : null}
           {ult ? (
             <span
               className="rounded-[4px] bg-amber-300/20 px-1 text-[8.5px] leading-[14px] font-bold tracking-wider text-amber-200"
@@ -160,7 +177,7 @@ const HeroFrame = ({
           ))}
           <span className="ml-auto flex items-center gap-0.5 text-[10px] font-semibold tabular-nums text-amber-200/90">
             <Coins className="size-2.5" />
-            {goldK(h.gold)}
+            {goldK(h.netWorth ?? h.gold)}
           </span>
         </span>
       </span>

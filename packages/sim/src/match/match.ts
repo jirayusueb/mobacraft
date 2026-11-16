@@ -19,16 +19,75 @@ import type { LaneId, MobaMap, Structure, Team, Vec2 } from "@mobacraft/map"
 import type { CreatureKind, HeroId } from "../kinds.ts"
 import { NEUTRALS_BY_CAMP } from "../kinds.ts"
 import type { FxEvent, Population, StructureStatus, Unit } from "../population.ts"
-import { type DraftSide, type DraftState, laneForRole } from "./draft.ts"
+import type { DraftSide, DraftState } from "./draft.ts"
 import { type Ability, type Effect, type HeroDef, type Role, heroDef } from "./heroes.ts"
-import { BUILD, MAX_ITEMS, itemById } from "./items.ts"
+import { MAX_ITEMS, itemById } from "./items.ts"
+import { matchupDamageMul, synergyPowerMul, teamSynergy } from "./matrix.ts"
 import { createNav } from "./nav.ts"
 import { createRandom } from "./random.ts"
+import {
+  type Behavior,
+  type LaneSlot,
+  type Phase,
+  type PlayerTactics,
+  type TeamTactics,
+  aiTactics,
+  buildById,
+  defaultTactics,
+  laneOfSlot,
+  normalizeTactics,
+} from "./tactics.ts"
 import { type Player, masteryOf } from "./teams.ts"
+import {
+  VISION_RADIUS,
+  WARD_BOUNTY,
+  WARD_LIFETIME,
+  WARD_MAX,
+  WARD_RECHARGE,
+  WARD_START,
+  type WardSpot,
+  clearGrid,
+  createVisionGrid,
+  isVisible,
+  mapControl,
+  reveal,
+  wardSpots,
+  zoneFor,
+} from "./vision.ts"
 
 export type CoachCall = "group" | "roshan" | "push" | "safe" | "farm"
 export const CALL_COOLDOWN = 60
 export const CALL_DURATION = 40
+export const SWAP_COOLDOWN = 60
+export const PLAN_COOLDOWN = 20
+export const IGL_CALL_DURATION = 20
+export const IGL_THINK = 20
+export const HISTORY_EVERY = 5
+/** Phase transitions (spec/06 §1), game seconds. */
+export const MID_AT = 7 * 60
+export const LATE_AT = 15 * 60
+export const ANTI_STALL_AT = 25 * 60
+
+export type GoldSource =
+  | "passive"
+  | "creeps"
+  | "neutrals"
+  | "kills"
+  | "assists"
+  | "structures"
+  | "roshan"
+  | "wards"
+export const GOLD_SOURCES: readonly GoldSource[] = [
+  "passive",
+  "creeps",
+  "neutrals",
+  "kills",
+  "assists",
+  "structures",
+  "roshan",
+  "wards",
+]
+export type IglCallKind = "gank" | "defend" | "back" | "push" | "group"
 
 const TICK = 0.1
 const SIDE_TEAM: Record<DraftSide, Team> = { blue: "radiant", red: "dire" }
@@ -90,6 +149,8 @@ interface Body {
   cooldown: number
   alive: boolean
   st: Status
+  /** Attacks + casts started (drives the renderer's attack swing). */
+  swings?: number
   /** Cached A* waypoints for heroes. */
   path?: Vec2[]
   pathKey?: string
@@ -115,7 +176,15 @@ interface HeroState {
   player: Player
   side: DraftSide
   role: Role
-  lane: "top" | "mid" | "bot" | "jungle"
+  slot: LaneSlot
+  /** Next index into the build preset (adaptive items don't advance it). */
+  buildIdx: number
+  adaptiveDone: boolean
+  /** Hero damage taken, by type (adaptive itemization). */
+  taken: { physical: number; magic: number }
+  /** Following the side's current coach call / IGL call (rolled at relay). */
+  followCoach: boolean
+  followIgl: boolean
   level: number
   xp: number
   gold: number
@@ -137,7 +206,18 @@ interface HeroState {
   mastery: number
 }
 
-type Intent = "lane" | "jungle" | "fight" | "push" | "retreat" | "roshan" | "group" | "dead"
+export type Intent =
+  | "lane"
+  | "jungle"
+  | "fight"
+  | "push"
+  | "retreat"
+  | "roshan"
+  | "group"
+  | "gank"
+  | "ward"
+  | "shop"
+  | "dead"
 
 export interface HeroLine {
   readonly id: string
@@ -161,11 +241,63 @@ export interface HeroLine {
   readonly items: readonly string[]
   readonly intent: Intent
   readonly aegis: boolean
+  readonly netWorth: number
+  readonly xp: number
+  readonly slot: LaneSlot
+  /** Following the active call (coach or IGL); null when no call is active. */
+  readonly following: boolean | null
+  readonly igl: boolean
+}
+
+export interface CommsEntry {
+  readonly t: number
+  readonly side: DraftSide
+  readonly from: "coach" | "igl"
+  /** Player relaying / making the call; null = no caller alive. */
+  readonly caller: string | null
+  readonly text: string
+  readonly followers: number
+  readonly total: number
+}
+
+export interface WardLine {
+  readonly id: string
+  readonly side: DraftSide
+  readonly x: number
+  readonly z: number
+  readonly expiresIn: number
+}
+
+export interface HistorySample {
+  readonly t: number
+  readonly nw: Readonly<Record<DraftSide, number>>
+  readonly xp: Readonly<Record<DraftSide, number>>
+  readonly control: Readonly<Record<DraftSide, number>>
+}
+
+export interface Purchase {
+  readonly t: number
+  readonly side: DraftSide
+  readonly heroId: string
+  readonly playerId: string
+  readonly itemId: string
+  readonly adaptive: boolean
 }
 
 export interface FeedEntry {
   readonly t: number
-  readonly kind: "kill" | "tower" | "rax" | "roshan" | "aegis" | "call" | "first-blood" | "ancient"
+  readonly kind:
+    | "kill"
+    | "tower"
+    | "rax"
+    | "roshan"
+    | "aegis"
+    | "call"
+    | "first-blood"
+    | "ancient"
+    | "phase"
+    | "ward"
+    | "swap"
   readonly side: DraftSide | "neutral"
   readonly text: string
 }
@@ -187,6 +319,27 @@ export interface MatchSnapshot {
   >
   readonly roshanAlive: boolean
   readonly winner: DraftSide | null
+  readonly phase: Phase
+  /** Game time each phase started (laning = 0). */
+  readonly phaseAt: Readonly<Partial<Record<Phase, number>>>
+  readonly netWorth: Readonly<Record<DraftSide, number>>
+  readonly sources: Readonly<Record<DraftSide, Readonly<Record<GoldSource, number>>>>
+  /** Map control 0..1 (visible walkable area). */
+  readonly control: Readonly<Record<DraftSide, number>>
+  readonly wards: readonly WardLine[]
+  readonly wardStock: Readonly<
+    Record<DraftSide, { readonly charges: number; readonly next: number }>
+  >
+  readonly comms: readonly CommsEntry[]
+  readonly history: readonly HistorySample[]
+  readonly purchases: readonly Purchase[]
+  readonly swapCooldown: Readonly<Record<DraftSide, number>>
+  readonly planCooldown: Readonly<Record<DraftSide, number>>
+  readonly iglCall: Readonly<
+    Record<DraftSide, { readonly kind: IglCallKind; readonly remaining: number } | null>
+  >
+  /** Team synergy score 0..15 from the draft. */
+  readonly synergy: Readonly<Record<DraftSide, number>>
 }
 
 export interface MatchOptions {
@@ -197,6 +350,8 @@ export interface MatchOptions {
   readonly aiCoach?: readonly DraftSide[]
   /** Hard cap on game time; the leader on towers/kills wins. */
   readonly maxTime?: number
+  /** Coach game plans (spec/06). Missing → AI sides get `aiTactics`, others `defaultTactics`. */
+  readonly tactics?: Partial<Record<DraftSide, TeamTactics>>
 }
 
 const polyline = (path: readonly Vec2[]) => {
@@ -264,9 +419,30 @@ const dist = (a: { x: number; z: number }, b: { x: number; z: number }) =>
   Math.hypot(a.x - b.x, a.z - b.z)
 
 /** Effective multipliers from player rating and mastery. */
+const otherSide = (s: DraftSide): DraftSide => (s === "blue" ? "red" : "blue")
 const skillMul = (h: HeroState) => 0.8 + h.player.skill / 50 + h.mastery * 0.15
 const powerOf = (h: HeroState) => 1 + h.items.reduce((s, id) => s + (itemById(id).power ?? 0), 0)
+const itemSum = (h: HeroState, k: "magicResist" | "armor") =>
+  h.items.reduce((s, id) => s + (itemById(id)[k] ?? 0), 0)
+const netWorthOf = (h: HeroState) =>
+  Math.round(h.gold + h.items.reduce((s, id) => s + itemById(id).cost, 0))
 const sideOf = (team: Team): DraftSide => TEAM_SIDE[team]
+const emptySources = (): Record<GoldSource, number> => ({
+  passive: 0,
+  creeps: 0,
+  neutrals: 0,
+  kills: 0,
+  assists: 0,
+  structures: 0,
+  roshan: 0,
+  wards: 0,
+})
+const slotLane = (h: HeroState): LaneId | null => laneOfSlot(h.slot, h.side)
+/** Ranged non-carries deal mostly ability (magic) damage — adaptive-item draft heuristic. */
+const MAGIC_HEAVY = (id: string) => {
+  const d = heroDef(id)
+  return d.attack === "ranged" && !d.roles.includes("carry")
+}
 const avgLevel = (xs: readonly Body[]) => xs.reduce((a, h) => a + h.hero!.level, 0) / xs.length
 
 export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptions) => {
@@ -295,6 +471,85 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const empowered = new Set<string>()
   const campTimers = new Map<string, number>()
   let roshanTimer = 0
+
+  // --- tactics state (spec/06) ------------------------------------------------------
+  const tac: Record<DraftSide, TeamTactics> = {
+    blue: normalizeTactics(
+      draft,
+      "blue",
+      options.tactics?.blue ??
+        (aiSides.has("blue") ? aiTactics(draft, "blue") : defaultTactics(draft, "blue")),
+    ),
+    red: normalizeTactics(
+      draft,
+      "red",
+      options.tactics?.red ??
+        (aiSides.has("red") ? aiTactics(draft, "red") : defaultTactics(draft, "red")),
+    ),
+  }
+  let phase: Phase = "laning"
+  const phaseAt: Partial<Record<Phase, number>> = { laning: 0 }
+  let tier1Down = 0
+  let tier3Down = false
+  const sources: Record<DraftSide, Record<GoldSource, number>> = {
+    blue: emptySources(),
+    red: emptySources(),
+  }
+  const synergyScore: Record<DraftSide, number> = {
+    blue: teamSynergy(draft.picks.blue.map((p) => p.heroId)),
+    red: teamSynergy(draft.picks.red.map((p) => p.heroId)),
+  }
+  const synergyMul: Record<DraftSide, number> = {
+    blue: synergyPowerMul(draft.picks.blue.map((p) => p.heroId)),
+    red: synergyPowerMul(draft.picks.red.map((p) => p.heroId)),
+  }
+  const matchupCache = new Map<string, number>()
+  const matchupMul = (a: string, b: string) => {
+    const key = `${a}|${b}`
+    let v = matchupCache.get(key)
+    if (v === undefined) {
+      v = matchupDamageMul(a, b)
+      matchupCache.set(key, v)
+    }
+    return v
+  }
+  const comms: CommsEntry[] = []
+  const history: HistorySample[] = []
+  const purchases: Purchase[] = []
+  let nextSample = 0
+  const swapCd = { blue: 0, red: 0 }
+  const planCd = { blue: 0, red: 0 }
+  const pendingPlans: { side: DraftSide; at: number; apply: () => void; text: string }[] = []
+  /** Coach call relay: null = relayed (or no call); number = game time it will be relayed. */
+  const relayAt: Record<DraftSide, number | null> = { blue: null, red: null }
+  interface IglCall {
+    kind: IglCallKind
+    remaining: number
+    at?: Vec2
+    target?: Body
+  }
+  const iglCall: Record<DraftSide, IglCall | null> = { blue: null, red: null }
+  let iglThink = IGL_THINK
+  /** Carry item count when the spike call last fired (fires once at 2 items). */
+  const spikeFired = { blue: false, red: false }
+  // Vision
+  const visionGrid = { blue: createVisionGrid(map), red: createVisionGrid(map) }
+  const control = { blue: 0, red: 0 }
+  let visionTimer = 0
+  const spots: readonly WardSpot[] = wardSpots(map)
+  interface Ward {
+    id: string
+    side: DraftSide
+    x: number
+    z: number
+    expires: number
+    spotId: string
+  }
+  let wards: Ward[] = []
+  const wardStock = {
+    blue: { charges: WARD_START, next: WARD_RECHARGE },
+    red: { charges: WARD_START, next: WARD_RECHARGE },
+  }
 
   const bodies: Body[] = []
   /** Ability usage counters (balance reports / tests). */
@@ -396,7 +651,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           player,
           side,
           role,
-          lane: laneForRole(role),
+          slot: tac[side].players[player.id]!.slot,
+          buildIdx: 0,
+          adaptiveDone: false,
+          taken: { physical: 0, magic: 0 },
+          followCoach: false,
+          followIgl: false,
           level: 1,
           xp: 0,
           gold: 600,
@@ -571,6 +831,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (!target.alive) return
     if (target.structure && !vulnerable(target)) return
     let dmg = raw * (kind === "physical" ? mitigation(target) : 0.85)
+    if (kind === "magic" && target.hero)
+      dmg *= 1 - Math.min(0.6, itemSum(target.hero, "magicResist"))
+    if (src?.hero && target.hero) {
+      const m = matchupMul(src.hero.def.id, target.hero.def.id)
+      dmg *= phase === "laning" ? 1 + (m - 1) * 0.5 : m
+      target.hero.taken[kind] += dmg
+    }
+    if (phase === "laning" && target.type === "tower" && (target.structure?.tier ?? 1) === 1)
+      dmg *= 0.75
     if (target.st.shield > 0) {
       const absorbed = Math.min(target.st.shield, dmg)
       target.st.shield -= absorbed
@@ -595,10 +864,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   const fx = (e: FxEvent) => fxQueue.push(e)
 
-  const grant = (h: Body, gold: number, xp: number) => {
+  const grant = (h: Body, gold: number, xp: number, source: GoldSource) => {
     const s = h.hero!
     s.gold += gold
     s.goldEarned += gold
+    sources[s.side][source] += gold
     s.xp += xp
     while (s.level < MAX_LEVEL && s.xp >= XP_CURVE[s.level]!) {
       s.level++
@@ -634,7 +904,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (target.type === "hero") {
       const h = target.hero!
       h.deaths++
-      h.respawn = RESPAWN_BASE + h.level * RESPAWN_PER_LEVEL
+      h.respawn = (RESPAWN_BASE + h.level * RESPAWN_PER_LEVEL) * (phase === "late" ? 1.3 : 1)
       h.intent = "dead"
       const lost = Math.min(h.gold, 60 + h.level * 15)
       h.gold -= lost
@@ -648,11 +918,16 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       )
       if (killer) {
         killer.hero!.kills++
-        grant(killer, KILL_GOLD + h.level * 12 + (firstBlood ? 0 : 150), KILL_XP + h.level * 20)
+        grant(
+          killer,
+          KILL_GOLD + h.level * 12 + (firstBlood ? 0 : 150),
+          KILL_XP + h.level * 20,
+          "kills",
+        )
       }
       for (const a of assisters) {
         a.hero!.assists++
-        grant(a, ASSIST_GOLD, KILL_XP * 0.6)
+        grant(a, ASSIST_GOLD, KILL_XP * 0.6, "assists")
       }
       const text = killer
         ? `${heroLabel(killer)} slew ${heroLabel(target)}`
@@ -673,14 +948,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       const xp = target.type === "creep" ? CREEP_XP : NEUTRAL_XP
       if (killer) {
         killer.hero!.lastHits++
-        grant(killer, gold, xp * 0.5)
+        grant(killer, gold, xp * 0.5, target.type === "creep" ? "creeps" : "neutrals")
       }
       const sharers = heroes.filter(
         (h) =>
           h.alive && h.team !== target.team && h.team !== "neutral" && dist(h, target) < XP_RANGE,
       )
       // Shared XP decays with sqrt so duo lanes aren't starved.
-      for (const h of sharers) grant(h, 0, (xp * 0.8) / Math.sqrt(Math.max(1, sharers.length)))
+      for (const h of sharers)
+        grant(h, 0, (xp * 0.8) / Math.sqrt(Math.max(1, sharers.length)), "creeps")
       if (target.type === "neutral" && target.home) {
         const campId = target.home.campId
         const remaining = bodies.some(
@@ -695,7 +971,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       const team = (killer?.team ?? target.lastHit?.team) as Team | undefined
       roshanTimer = ROSHAN_RESPAWN
       if (team) {
-        for (const h of heroes.filter((x) => x.team === team)) grant(h, ROSHAN_GOLD, 300)
+        for (const h of heroes.filter((x) => x.team === team)) grant(h, ROSHAN_GOLD, 300, "roshan")
         const carrier =
           heroes
             .filter((x) => x.team === team && x.alive)
@@ -721,7 +997,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const atkSide = sideOf(attackers)
     if (target.type === "tower") {
       towersDown[atkSide]++
-      for (const h of heroes.filter((x) => x.team === attackers)) grant(h, TOWER_GOLD, 120)
+      if ((s.tier ?? 1) === 1) tier1Down++
+      if ((s.tier ?? 1) === 3) tier3Down = true
+      for (const h of heroes.filter((x) => x.team === attackers))
+        grant(h, TOWER_GOLD, 120, "structures")
       feed.push({
         t: clock,
         kind: "tower",
@@ -730,6 +1009,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       })
     } else if (target.type === "rax") {
       if (s.lane) empowered.add(`${atkSide}:${s.lane}`)
+      tier3Down = true
       feed.push({
         t: clock,
         kind: "rax",
@@ -750,7 +1030,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   // --- abilities ---------------------------------------------------------------------
   const applyEffects = (caster: Body, targets: readonly Body[], ability: Ability) => {
     const h = caster.hero!
-    const power = powerOf(h) * skillMul(h)
+    const power = powerOf(h) * skillMul(h) * synergyMul[h.side]
     for (const t of targets) {
       for (const e of ability.effects) applyEffect(caster, t, e, power, h.level)
     }
@@ -816,12 +1096,18 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const tg = ability.target
     const reach =
       "range" in tg ? tg.range + ("radius" in tg ? tg.radius : 0) : "radius" in tg ? tg.radius : 8
-    const foes = [...near(b, reach + 1)].filter((o) => isEnemy(b, o) && !o.structure)
+    const foes = [...near(b, reach + 1)].filter((o) => isEnemy(b, o) && !o.structure && seen(b, o))
     const friends = heroes.filter((o) => o.alive && o.team === b.team)
     let targets: Body[] = []
     let at: { x: number; z: number } = b
     let radius = 0
-    const minT = ability.minTargets ?? 1
+    // Ult discipline: AoE/line ults wait for 1..3 heroes; single-target ults wait for a weak target.
+    const disc = behaviorOf(h).ultDiscipline
+    const aoeLike = tg.kind === "enemy-aoe" || tg.kind === "self-aoe" || tg.kind === "line"
+    const minT =
+      isUlt && aoeLike
+        ? Math.max(ability.minTargets ?? 1, 1 + Math.round((2 * disc) / 100))
+        : (ability.minTargets ?? 1)
     const heroFoes = foes.filter((f) => f.type === "hero")
     const pickFoes = heroFoes.length ? heroFoes : foes
 
@@ -829,6 +1115,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       case "enemy": {
         const inRange = pickFoes
           .filter((f) => dist(b, f) <= tg.range)
+          .filter((f) => !(isUlt && disc >= 70 && f.type === "hero" && f.hp / f.maxHp > 0.5))
           .toSorted((x, y) => x.hp / x.maxHp - y.hp / y.maxHp)
         if (inRange[0]) targets = [inRange[0]]
         at = targets[0] ?? b
@@ -941,6 +1228,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     else fx({ t: clock, kind: "aoe", at: { x: b.x, z: b.z }, radius: 1.4, team: b.team, style })
     if (isUlt) h.ultCd = ability.cooldown
     else h.skillCd = ability.cooldown
+    b.swings = (b.swings ?? 0) + 1
     casts.set(
       `${h.def.id}:${isUlt ? "ult" : "skill"}`,
       (casts.get(`${h.def.id}:${isUlt ? "ult" : "skill"}`) ?? 0) + 1,
@@ -1047,94 +1335,328 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     )
   }
 
+  // --- tactics helpers ----------------------------------------------------------------
+  const ptac = (h: HeroState): PlayerTactics => tac[h.side].players[h.player.id]!
+  /** Effective aggression 0..100 (laning `aggressive` plan adds 15). */
+  const aggressionOf = (h: HeroState) =>
+    Math.min(
+      100,
+      ptac(h).behavior.aggression +
+        (phase === "laning" && tac[h.side].plans.laning === "aggressive" ? 15 : 0),
+    )
+  const behaviorOf = (h: HeroState): Behavior => ptac(h).behavior
+  /** You always see heroes in your team's vision, or anyone within 3 tiles. */
+  const seen = (viewer: Body, o: Body) =>
+    o.type !== "hero" ||
+    dist(viewer, o) <= 3 ||
+    isVisible(visionGrid[sideOf(viewer.team as Team)], o)
+  const visibleEnemyHeroes = (side: DraftSide) =>
+    heroes.filter((e) => e.alive && e.hero!.side !== side && isVisible(visionGrid[side], e))
+
+  const coreOf = (side: DraftSide) =>
+    heroes
+      .filter((x) => x.hero!.side === side && x.alive && x.hero!.role !== "support")
+      .toSorted(
+        (a, b) =>
+          (b.hero!.role === "carry" ? 1 : 0) - (a.hero!.role === "carry" ? 1 : 0) ||
+          netWorthOf(b.hero!) - netWorthOf(a.hero!),
+      )[0]
+  const warderOf = (side: DraftSide) => {
+    const alive = heroes.filter((x) => x.hero!.side === side && x.alive)
+    return (
+      alive.find((x) => x.hero!.slot === "roam") ??
+      alive.find((x) => x.hero!.role === "support") ??
+      alive.toSorted((a, b) => netWorthOf(a.hero!) - netWorthOf(b.hero!))[0]
+    )
+  }
+  const wardTarget = (side: DraftSide): WardSpot | undefined => {
+    const team = SIDE_TEAM[side]
+    for (const zone of tac[side].vision) {
+      if (zone === "enemy-jungle" && phase === "laning") continue
+      const spot = spots.find(
+        (sp) =>
+          zoneFor(sp, team) === zone && !wards.some((w) => w.side === side && w.spotId === sp.id),
+      )
+      if (spot) return spot
+    }
+    return undefined
+  }
+
+  // --- next purchase (build preset + adaptive rule) ---------------------------------------
+  const nextItemOf = (h: HeroState): { id: string; adaptive: boolean } | null => {
+    if (h.items.length >= MAX_ITEMS) return null
+    const pt = ptac(h)
+    if (pt.adaptive && !h.adaptiveDone && h.items.length >= 1) {
+      const total = h.taken.magic + h.taken.physical
+      const enemyIds = draft.picks[otherSide(h.side)].map((p) => p.heroId)
+      const magicShare =
+        total >= 800
+          ? h.taken.magic / total
+          : enemyIds.filter(MAGIC_HEAVY).length / Math.max(1, enemyIds.length)
+      if (magicShare >= 0.65 && itemSum(h, "magicResist") === 0)
+        return { id: "nullstone", adaptive: true }
+      if (1 - magicShare >= 0.65 && itemSum(h, "armor") === 0)
+        return { id: "plate", adaptive: true }
+    }
+    const id = buildById(pt.build).items[h.buildIdx]
+    return id ? { id, adaptive: false } : null
+  }
+  const buy = (b: Body) => {
+    const h = b.hero!
+    for (let guard = 0; guard < 3; guard++) {
+      const next = nextItemOf(h)
+      if (!next) return
+      const cost = itemById(next.id).cost
+      if (h.gold < cost) return
+      h.gold -= cost
+      h.items.push(next.id)
+      if (next.adaptive) h.adaptiveDone = true
+      else h.buildIdx++
+      purchases.push({
+        t: clock,
+        side: h.side,
+        heroId: h.def.id,
+        playerId: h.player.id,
+        itemId: next.id,
+        adaptive: next.adaptive,
+      })
+      recomputeStats(b)
+    }
+  }
+
+  /** Go to the team objective, gathering on the lead first. */
+  const goGroup = (b: Body, h: HeroState, intent: "group" | "push", need: number): boolean => {
+    const obj = objectiveFor(b.team as Team)
+    if (!obj) return false
+    const lead = coreOf(h.side) ?? b
+    const gathered = alliesNear(lead, 8).length >= need
+    h.intent = intent
+    h.goal = gathered || b === lead ? { x: obj.x, z: obj.z } : { x: lead.x, z: lead.z }
+    return true
+  }
+  const goFarm = (b: Body, h: HeroState): boolean => {
+    if (h.role === "support" && h.slot !== "jungle") return false
+    const camp = nearestCamp(b)
+    if (!camp) return false
+    h.intent = "jungle"
+    h.goal = camp.position
+    return true
+  }
+  const goLane = (b: Body, h: HeroState, laneId: LaneId) => {
+    h.intent = "lane"
+    h.goal = laneFront(b.team as Team, laneId)
+  }
+  const goGank = (b: Body, h: HeroState, target: Body) => {
+    h.intent = "gank"
+    h.goal = { x: target.x, z: target.z }
+  }
+  /** Farm-priority players keep farming until 2+ allies are already at the objective. */
+  const lateJoiner = (b: Body, h: HeroState) => {
+    // Only mid game, never the group's lead, and only while someone else is forming the group.
+    if (behaviorOf(h).farm <= 50 || phase !== "mid" || coreOf(h.side) === b) return false
+    const eager = heroes.filter(
+      (x) => x.alive && x.hero!.side === h.side && behaviorOf(x.hero!).farm <= 50,
+    ).length
+    if (eager === 0) return false
+    const obj = objectiveFor(b.team as Team)
+    if (!obj) return false
+    return heroes.filter((x) => x.alive && x.team === b.team && dist(x, obj) < 12).length < 2
+  }
+  const defendSpot = (team: Team) => {
+    const own = [...structureBodies.values()].filter(
+      (t) => t.alive && t.team === team && (t.type === "tower" || t.type === "rax"),
+    )
+    const anc = [...structureBodies.values()].find((t) => t.type === "ancient" && t.team === team)!
+    return (
+      own
+        .filter((t) => (t.structure!.tier ?? 1) >= 3 || t.type === "rax")
+        .toSorted((a, c) => dist(c, anc) - dist(a, anc))[0] ?? anc
+    )
+  }
+  const enemiesDead = (side: DraftSide) =>
+    heroes.filter((x) => x.hero!.side !== side && !x.alive).length
+
   const think = (b: Body) => {
     const h = b.hero!
-    const call = calls[h.side].active
+    const side = h.side
+    const coach =
+      calls[side].active && relayAt[side] === null && h.followCoach ? calls[side].active : null
+    const igl = iglCall[side] && h.followIgl ? iglCall[side] : null
     const hpPct = b.hp / b.maxHp
     const sense = h.player.sense / 20
-    const foes = enemyHeroesNear(b, 9)
+    const aggr = aggressionOf(h)
+    const foes = enemyHeroesNear(b, 9).filter((f) => seen(b, f))
     const friends = alliesNear(b, 9)
     const myPower = friends.reduce((s, f) => s + (f.hp / f.maxHp) * (1 + f.hero!.level * 0.15), 0)
     const theirPower = foes.reduce((s, f) => s + (f.hp / f.maxHp) * (1 + f.hero!.level * 0.15), 0)
-    const retreatAt = (call === "safe" ? 0.45 : 0.3) - sense * 0.08 + (call === "push" ? -0.05 : 0)
+    const scale = phase === "laning" && tac[side].plans.laning === "scale" && h.slot !== "jungle"
+    const retreatAt =
+      (coach === "safe" ? 0.45 : 0.3) -
+      sense * 0.08 +
+      (coach === "push" ? -0.05 : 0) -
+      ((aggr - 50) / 50) * 0.1 +
+      (scale ? 0.08 : 0)
 
-    // Retreat: low hp, or outnumbered and hurt.
-    if (hpPct < retreatAt || (theirPower > myPower * 1.6 && hpPct < 0.6 && sense > 0.55)) {
+    // Retreat: low hp, or outnumbered and hurt (cautious players bail earlier).
+    if (
+      hpPct < retreatAt ||
+      (theirPower > myPower * (1.6 + (aggr - 50) / 100) && hpPct < 0.6 && sense > 0.55)
+    ) {
       h.intent = "retreat"
       h.goal = fountain(b.team as Team)
       return
     }
     if (h.intent === "retreat" && hpPct < 0.85) return
 
-    // Fight: enemies close and we're not badly outnumbered.
-    if (foes.length && myPower >= theirPower * (call === "safe" ? 1.2 : 0.8)) {
+    // Fight: enemies close and we're not badly outnumbered (aggression moves the bar).
+    const ratio =
+      coach === "safe" ? 1.2 : aggr <= 50 ? 1.2 - 0.008 * aggr : 0.8 - 0.002 * (aggr - 50)
+    if (foes.length && myPower >= theirPower * ratio) {
       h.intent = "fight"
       h.goal = null
       return
     }
 
-    // Shop when rich and at/near base.
-    const nextItem = BUILD[h.role][h.items.length]
+    // Shopping: always at base; `on-item` walks home for an affordable item.
+    const atBase = dist(b, fountain(b.team as Team)) < 14
+    if (atBase) buy(b)
+    const next = nextItemOf(h)
     if (
-      nextItem &&
-      h.items.length < MAX_ITEMS &&
-      h.gold >= itemById(nextItem).cost &&
-      dist(b, fountain(b.team as Team)) < 14
+      !atBase &&
+      next &&
+      tac[side].shopTiming === "on-item" &&
+      h.gold >= itemById(next.id).cost + 300 + behaviorOf(h).farm * 4 &&
+      !visibleEnemyHeroes(side).some((e) => dist(e, b) < 9)
     ) {
-      h.gold -= itemById(nextItem).cost
-      h.items.push(nextItem)
-      recomputeStats(b)
+      h.intent = "shop"
+      h.goal = fountain(b.team as Team)
+      return
+    }
+    if (h.intent === "shop" && !atBase && next && h.gold >= itemById(next.id).cost) return
+    if (igl?.kind === "back") {
+      h.intent = "shop"
+      h.goal = fountain(b.team as Team)
+      return
     }
 
-    const midGame = clock > 8 * 60
+    // Warding: the team's warder spends charges on the highest-priority open spot.
+    if (wardStock[side].charges > 0 && warderOf(side) === b && !coach) {
+      const spot = wardTarget(side)
+      if (spot) {
+        h.intent = "ward"
+        h.goal = spot.at
+        return
+      }
+    }
+
     const roshanUp = bodies.some((x) => x.alive && x.type === "roshan")
-    if (call === "roshan" && roshanUp) {
+    // 1) Coach calls (relayed by the IGL, followed per player).
+    if (coach === "roshan" && roshanUp) {
       h.intent = "roshan"
       h.goal = roshanPos
       return
     }
-    if (call === "group" || call === "push" || (midGame && h.level >= 8 && call !== "farm")) {
+    if ((coach === "group" || coach === "push") && goGroup(b, h, coach, coach === "push" ? 2 : 3))
+      return
+    if (coach === "farm" && goFarm(b, h)) return
+
+    // 2) IGL tactical calls.
+    if (igl) {
+      if (igl.kind === "gank" && igl.target?.alive && dist(b, igl.target) < 30) {
+        goGank(b, h, igl.target)
+        return
+      }
+      if (igl.kind === "defend" && igl.at) {
+        h.intent = "group"
+        h.goal = igl.at
+        return
+      }
+      if ((igl.kind === "push" || igl.kind === "group") && !lateJoiner(b, h))
+        if (goGroup(b, h, igl.kind === "push" ? "push" : "group", igl.kind === "push" ? 2 : 3))
+          return
+    }
+
+    // 3) Phase plans.
+    const plans = tac[side].plans
+    const stall = clock >= ANTI_STALL_AT
+    if (phase === "laning") {
+      const roamer =
+        h.slot === "roam" ||
+        (plans.laning === "roam" &&
+          h.slot === "jungle" &&
+          !heroes.some((x) => x.hero!.side === side && x.hero!.slot === "roam"))
+      if (roamer) {
+        const prey = visibleEnemyHeroes(side)
+          .filter((e) => e.hp / e.maxHp <= 0.6 && dist(e, b) < 20)
+          .toSorted((x, y) => x.hp / x.maxHp - y.hp / y.maxHp)[0]
+        if (prey) {
+          goGank(b, h, prey)
+          return
+        }
+        const lanesCycle: readonly LaneId[] = ["top", "mid", "bot"]
+        goLane(b, h, lanesCycle[Math.floor(clock / 45) % 3]!)
+        return
+      }
+      if (h.slot === "jungle") {
+        if (goFarm(b, h)) return
+        goLane(b, h, "mid")
+        return
+      }
+      goLane(b, h, slotLane(h) ?? "mid")
+      return
+    }
+
+    const mid = phase === "mid"
+    const plan: string = mid ? plans.mid : plans.late
+    const effective = stall && (plan === "defend" || plan === "farm") ? "siege" : plan
+    if (!mid && effective === "roshan" && roshanUp) {
+      const ready = heroes.filter((x) => x.alive && x.team === b.team).length >= 4
+      if (ready) {
+        h.intent = "roshan"
+        h.goal = roshanPos
+        return
+      }
+    }
+    if (effective === "defend") {
+      if (enemiesDead(side) >= 2 && goGroup(b, h, "push", 3)) return
+      const spot = defendSpot(b.team as Team)
+      h.intent = "group"
+      h.goal = { x: spot.x, z: spot.z }
+      return
+    }
+    if (effective === "farm") {
+      if (goFarm(b, h)) return
+      goLane(b, h, slotLane(h) ?? "mid")
+      return
+    }
+    if (effective === "pickoff") {
+      const prey = visibleEnemyHeroes(side).find(
+        (e) =>
+          dist(e, b) < 30 &&
+          !heroes.some((o) => o !== e && o.alive && o.team === e.team && dist(o, e) < 8) &&
+          heroes.filter((a) => a.alive && a.team === b.team && dist(a, e) < 25).length >= 2,
+      )
+      if (prey) {
+        goGank(b, h, prey)
+        return
+      }
+      // Nothing to hunt: farm, and group once the team has levels.
+      if (h.level < 9 && goFarm(b, h)) return
+    }
+    if (effective === "split" && coreOf(side) === b) {
       const obj = objectiveFor(b.team as Team)
-      if (obj) {
-        // Group: gather on the carry first, then go.
-        const lead = heroes
-          .filter((x) => x.alive && x.team === b.team)
-          .toSorted(
-            (x, y) => (y.hero!.role === "carry" ? 1 : 0) - (x.hero!.role === "carry" ? 1 : 0),
-          )[0]!
-        const gathered = alliesNear(lead, 8).length >= (call === "push" ? 2 : 3)
-        h.intent = call === "push" ? "push" : "group"
-        h.goal = gathered || b === lead ? { x: obj.x, z: obj.z } : { x: lead.x, z: lead.z }
-        return
-      }
-    }
-    if (h.lane === "jungle" || call === "farm") {
-      const camp = nearestCamp(b)
-      if (camp && (h.lane === "jungle" || h.role !== "support")) {
-        h.intent = "jungle"
-        h.goal = camp.position
-        return
-      }
-    }
-    // Late roshan attempt by strong teams.
-    if (midGame && roshanUp && h.level >= 11 && rng.chance(0.02)) {
-      h.intent = "roshan"
-      h.goal = roshanPos
+      const far = (["top", "mid", "bot"] as const)
+        .map((l) => ({ l, at: laneFront(b.team as Team, l) }))
+        .toSorted((x, y) => (obj ? dist(y.at, obj) - dist(x.at, obj) : 0))[0]!
+      h.intent = "push"
+      h.goal = far.at
       return
     }
-    h.intent = "lane"
-    const lane = h.lane === "jungle" ? "mid" : h.lane
-    // Lane ids are map-global. Radiant's safe lane is bot, Dire's is top (Dota layout):
-    // role lanes are written from Radiant's view, so Dire swaps top/bot.
-    const laneId: LaneId =
-      b.team === "dire"
-        ? lane === "bot"
-          ? "top"
-          : lane === "top"
-            ? "bot"
-            : "mid"
-        : (lane as LaneId)
-    h.goal = laneFront(b.team as Team, laneId)
+    // group / siege / roshan (Roshan down) / split (non-splitters) / pickoff fallback.
+    if (lateJoiner(b, h) && (goFarm(b, h) || (slotLane(h) && (goLane(b, h, slotLane(h)!), true))))
+      return
+    if (goGroup(b, h, "group", mid ? 3 : 4)) return
+    goLane(b, h, slotLane(h) ?? "mid")
   }
 
   // Spatial hash (4×4 tile cells), rebuilt once per tick: target queries stay O(nearby).
@@ -1158,6 +1680,24 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) yield* grid[z * COLS + x]!
   }
 
+  /** Target-priority slider: 0..10 bonus for hero `o` as seen by `h`. */
+  const heroPriority = (h: HeroState, o: Body) => {
+    const oh = o.hero!
+    const low = (1 - o.hp / o.maxHp) * 10
+    switch (behaviorOf(h).target) {
+      case "weakest":
+        return low
+      case "carry":
+        return (oh.role === "carry" || oh.role === "mid" ? 7 : 0) + low * 0.3
+      case "support":
+        return (oh.role === "support" ? 7 : 0) + low * 0.3
+      case "nearest":
+        return low * 0.2
+      case "threat":
+        return Math.min(7, oh.heroDamage / Math.max(1, clock * 2)) + low * 0.3
+    }
+  }
+
   /** Pick the best attack target in range for any unit. */
   const chooseTarget = (b: Body, radius: number): Body | undefined => {
     let best: Body | undefined
@@ -1170,7 +1710,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       let score = -d
       if (b.type === "hero") {
         const sense = b.hero!.player.sense / 20
-        if (o.type === "hero") score += 8 + (1 - o.hp / o.maxHp) * 10 * sense
+        if (o.type === "hero" && !seen(b, o)) continue
+        if (o.type === "hero") score += 8 + heroPriority(b.hero!, o) * sense
         // Last-hit creeps: prefer low hp ones the hero can kill.
         if (o.type === "creep") score += o.hp < b.damage * 1.2 ? 6 * sense + 2 : 0
         if (o.structure) score += b.hero!.intent === "push" || b.hero!.intent === "group" ? 6 : 2
@@ -1198,6 +1739,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     let dmg = b.damage * statMul(b, "attack")
     if (b.hero) dmg *= rng.range(0.9, 1.1)
     deal(b, t, dmg, "physical")
+    b.swings = (b.swings ?? 0) + 1
     b.cooldown = b.attackTime / statMul(b, "attackSpeed")
     if (b.range > 2.5) {
       const style =
@@ -1246,6 +1788,291 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     s.buffs = s.buffs.filter((x) => x.t > 0)
   }
 
+  // --- phases, vision, wards, IGL, history (spec/06) --------------------------------------
+  const setPhase = (p: Phase) => {
+    if (p === phase) return
+    phase = p
+    phaseAt[p] = clock
+    feed.push({
+      t: clock,
+      kind: "phase",
+      side: "neutral",
+      text:
+        p === "mid" ? "Mid game — the laning phase is over" : "Late game — high ground is in play",
+    })
+    for (const hb of heroes) hb.hero!.rethink = 0
+  }
+  const updatePhase = () => {
+    if (phase === "laning" && (clock >= MID_AT || tier1Down >= 2)) setPhase("mid")
+    if (
+      phase === "mid" &&
+      (clock >= LATE_AT ||
+        tier3Down ||
+        avgLevel(heroes.filter((x) => x.team === "radiant")) >= 12 ||
+        avgLevel(heroes.filter((x) => x.team === "dire")) >= 12)
+    )
+      setPhase("late")
+  }
+
+  const updateVision = () => {
+    for (const side of ["blue", "red"] as const) {
+      const g = visionGrid[side]
+      const team = SIDE_TEAM[side]
+      clearGrid(g)
+      for (const b of bodies) {
+        if (!b.alive || b.team !== team) continue
+        const r =
+          b.type === "hero"
+            ? VISION_RADIUS.hero
+            : b.type === "creep"
+              ? VISION_RADIUS.creep
+              : b.type === "tower"
+                ? VISION_RADIUS.tower
+                : b.structure
+                  ? VISION_RADIUS.structure
+                  : 0
+        if (r) reveal(g, b, r)
+      }
+      for (const w of wards) if (w.side === side) reveal(g, w, VISION_RADIUS.ward)
+      control[side] = mapControl(g)
+    }
+  }
+
+  const tickWards = (dt: number) => {
+    for (const side of ["blue", "red"] as const) {
+      const st = wardStock[side]
+      if (st.charges >= WARD_MAX) st.next = WARD_RECHARGE
+      else {
+        st.next -= dt
+        if (st.next <= 0) {
+          st.charges++
+          st.next = WARD_RECHARGE
+        }
+      }
+    }
+    wards = wards.filter((w) => w.expires > clock)
+    for (const b of heroes) {
+      if (!b.alive) continue
+      const h = b.hero!
+      // Plant.
+      if (h.intent === "ward" && h.goal && dist(b, h.goal) < 1.5 && wardStock[h.side].charges > 0) {
+        const spot = spots.find((sp) => dist(sp.at, h.goal!) < 0.5)
+        if (spot && !wards.some((w) => w.side === h.side && w.spotId === spot.id)) {
+          wardStock[h.side].charges--
+          wards.push({
+            id: `ward-${uid++}`,
+            side: h.side,
+            x: spot.at.x,
+            z: spot.at.z,
+            expires: clock + WARD_LIFETIME,
+            spotId: spot.id,
+          })
+        }
+        h.rethink = 0
+      }
+      // Deward: supports/roamers spot enemy wards within 4 tiles.
+      if (h.role === "support" || h.slot === "roam") {
+        const w = wards.find((x) => x.side !== h.side && dist(x, b) <= 4)
+        if (w) {
+          wards = wards.filter((x) => x !== w)
+          grant(b, WARD_BOUNTY, 0, "wards")
+          feed.push({
+            t: clock,
+            kind: "ward",
+            side: h.side,
+            text: `${heroLabel(b)} destroyed an enemy ward`,
+          })
+        }
+      }
+    }
+  }
+
+  /** Who relays calls now: IGL, else the best-leadership living backup, else nobody. */
+  const callerOf = (side: DraftSide) => {
+    const team = heroes.filter((x) => x.hero!.side === side)
+    const igl = team.find((x) => x.hero!.player.id === tac[side].igl)!
+    if (igl.alive) return { body: igl, backup: false }
+    const backup = team
+      .filter((x) => x.alive)
+      .toSorted((a, b) => b.hero!.player.leadership - a.hero!.player.leadership)[0]
+    return backup ? { body: backup, backup: true } : null
+  }
+  const relayDelay = (side: DraftSide) => {
+    const c = callerOf(side)
+    if (!c) return null
+    return 3 - (2.5 * c.body.hero!.player.leadership) / 20 + (c.backup ? 1.5 : 0)
+  }
+  /** One seeded roll per player per relayed call. Returns followers. */
+  const rollFollow = (side: DraftSide, kind: string, which: "coach" | "igl") => {
+    const c = callerOf(side)
+    const lead = c ? c.body.hero!.player.leadership : 0
+    let n = 0
+    for (const b of heroes) {
+      const h = b.hero!
+      if (h.side !== side) continue
+      const aggr = aggressionOf(h)
+      const cautious = kind === "safe" || kind === "back" || kind === "farm"
+      const bold = kind === "push" || kind === "gank" || kind === "roshan" || kind === "group"
+      const fit = cautious ? (50 - aggr) / 50 : bold ? (aggr - 50) / 50 : 0
+      const p = Math.max(
+        0.3,
+        Math.min(0.98, 0.55 + (0.45 * lead) / 20 + 0.15 * fit - (c?.backup ? 0.15 : 0)),
+      )
+      const follows = rng.chance(p)
+      if (which === "coach") h.followCoach = follows
+      else h.followIgl = follows
+      if (follows) n++
+      h.rethink = 0
+    }
+    return n
+  }
+  const logComms = (side: DraftSide, from: "coach" | "igl", text: string, followers: number) => {
+    const c = callerOf(side)
+    comms.push({
+      t: clock,
+      side,
+      from,
+      caller: c ? c.body.hero!.player.name : null,
+      text,
+      followers,
+      total: 5,
+    })
+    if (comms.length > 200) comms.splice(0, comms.length - 200)
+  }
+
+  const IGL_TEXT: Record<IglCallKind, string> = {
+    gank: "Gank",
+    defend: "Defend base",
+    back: "Back, reset",
+    push: "They're down — push!",
+    group: "Spike! Group up",
+  }
+  const issueIgl = (side: DraftSide, call: IglCall, label: string) => {
+    if (!callerOf(side)) return
+    iglCall[side] = call
+    const n = rollFollow(side, call.kind, "igl")
+    logComms(side, "igl", label, n)
+  }
+  const iglDecide = (side: DraftSide) => {
+    if (calls[side].active || iglCall[side]) return
+    const team = SIDE_TEAM[side]
+    const mine = heroes.filter((x) => x.team === team)
+    const alive = mine.filter((x) => x.alive)
+    // Spike: carry finished its 2nd item.
+    const core = coreOf(side)
+    if (tac[side].spike && !spikeFired[side] && core && core.hero!.items.length >= 2) {
+      spikeFired[side] = true
+      if (phase !== "laning") {
+        issueIgl(side, { kind: "group", remaining: IGL_CALL_DURATION }, IGL_TEXT.group)
+        return
+      }
+    }
+    // Defend: an own structure is being hit by enemy heroes.
+    const sieged = [...structureBodies.values()].find(
+      (t) =>
+        t.alive &&
+        t.team === team &&
+        t.hp < t.maxHp * 0.8 &&
+        heroes.some((e) => e.alive && e.team !== team && dist(e, t) < 8),
+    )
+    if (sieged && phase !== "laning") {
+      issueIgl(
+        side,
+        { kind: "defend", remaining: IGL_CALL_DURATION, at: { x: sieged.x, z: sieged.z } },
+        IGL_TEXT.defend,
+      )
+      return
+    }
+    const avgHp = alive.reduce((s, x) => s + x.hp / x.maxHp, 0) / Math.max(1, alive.length)
+    if (avgHp < 0.4 || mine.length - alive.length >= 2) {
+      issueIgl(side, { kind: "back", remaining: 10 }, IGL_TEXT.back)
+      return
+    }
+    if (enemiesDead(side) >= 2 && alive.length >= 4 && phase !== "laning") {
+      issueIgl(side, { kind: "push", remaining: IGL_CALL_DURATION }, IGL_TEXT.push)
+      return
+    }
+    const prey = visibleEnemyHeroes(side).find(
+      (e) => e.hp / e.maxHp <= 0.6 && alive.filter((a) => dist(a, e) < 25).length >= 2,
+    )
+    if (prey) {
+      issueIgl(
+        side,
+        { kind: "gank", remaining: IGL_CALL_DURATION, target: prey },
+        `${IGL_TEXT.gank} ${prey.hero!.def.name}`,
+      )
+    }
+  }
+
+  const sampleHistory = () => {
+    const sum = sideSum
+    history.push({
+      t: Math.round(clock),
+      nw: { blue: sum("blue", netWorthOf), red: sum("red", netWorthOf) },
+      xp: { blue: Math.round(sum("blue", (h) => h.xp)), red: Math.round(sum("red", (h) => h.xp)) },
+      control: {
+        blue: Math.round(control.blue * 1000) / 1000,
+        red: Math.round(control.red * 1000) / 1000,
+      },
+    })
+  }
+
+  const tickTactics = (dt: number) => {
+    updatePhase()
+    visionTimer -= dt
+    if (visionTimer <= 0) {
+      updateVision()
+      visionTimer = 0.5
+    }
+    tickWards(dt)
+    for (const side of ["blue", "red"] as const) {
+      swapCd[side] = Math.max(0, swapCd[side] - dt)
+      planCd[side] = Math.max(0, planCd[side] - dt)
+      const ic = iglCall[side]
+      if (ic) {
+        ic.remaining -= dt
+        if (ic.remaining <= 0 || (ic.kind === "gank" && !ic.target?.alive)) {
+          iglCall[side] = null
+          for (const b of heroes) if (b.hero!.side === side) b.hero!.followIgl = false
+        }
+      }
+      // Relay a pending coach call once its latency elapses and a caller is alive.
+      const at = relayAt[side]
+      if (at !== null && calls[side].active) {
+        if (at <= clock) {
+          if (callerOf(side)) {
+            relayAt[side] = null
+            iglCall[side] = null
+            const n = rollFollow(side, calls[side].active!, "coach")
+            logComms(side, "coach", CALL_TEXT[calls[side].active!], n)
+          }
+        }
+      } else if (!calls[side].active) {
+        relayAt[side] = null
+        for (const b of heroes) if (b.hero!.side === side) b.hero!.followCoach = false
+      }
+    }
+    for (let i = pendingPlans.length - 1; i >= 0; i--) {
+      const pp = pendingPlans[i]!
+      if (pp.at <= clock && callerOf(pp.side)) {
+        pp.apply()
+        logComms(pp.side, "coach", pp.text, 5)
+        for (const b of heroes) if (b.hero!.side === pp.side) b.hero!.rethink = 0
+        pendingPlans.splice(i, 1)
+      }
+    }
+    iglThink -= dt
+    if (iglThink <= 0) {
+      iglThink = IGL_THINK
+      iglDecide("blue")
+      iglDecide("red")
+    }
+    if (clock >= nextSample) {
+      sampleHistory()
+      nextSample += HISTORY_EVERY
+    }
+  }
+
   const step = (dt: number) => {
     if (winner) return
     clock += dt
@@ -1272,6 +2099,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       c.remaining = Math.max(0, c.remaining - dt)
       if (c.remaining === 0) c.active = null
     }
+    tickTactics(dt)
 
     rebuildGrid()
     for (const b of bodies) {
@@ -1300,6 +2128,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       }
       h.gold += PASSIVE_GOLD * dt
       h.goldEarned += PASSIVE_GOLD * dt
+      sources[h.side].passive += PASSIVE_GOLD * dt
       h.skillCd = Math.max(0, h.skillCd - dt)
       h.ultCd = Math.max(0, h.ultCd - dt)
       // Fountain regen.
@@ -1338,12 +2167,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         !tower ||
         h.intent === "push" ||
         h.intent === "group" ||
-        (target!.type === "hero" && target!.hp / target!.maxHp < 0.25) ||
+        (target!.type === "hero" &&
+          target!.hp / target!.maxHp < 0.1 + (aggressionOf(h) / 100) * 0.3) ||
         alliesNear(b, 8).length >= 3 ||
         bodies.some(
           (c) => c.alive && c.type === "creep" && c.team === b.team && dist(c, tower) < 6.5,
         )
-      if (target && dive && (h.intent !== "lane" || dist(b, target) < 7)) {
+      const leash = h.intent === "lane" ? 7 : h.intent === "ward" || h.intent === "shop" ? 3 : 99
+      if (target && dive && dist(b, target) < leash) {
         b.target = target
         if (dist(b, target) > b.range) moveToward(b, target, b.range * 0.9, dt)
         attack(b, target)
@@ -1456,13 +2287,108 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     s.active = c
     s.remaining = CALL_DURATION
     s.cooldown = CALL_COOLDOWN
+    relayAt[side] = clock + (relayDelay(side) ?? 0)
     feed.push({
       t: clock,
       kind: "call",
       side,
       text: `${side === "blue" ? draft.blue.tag : draft.red.tag} coach: ${CALL_TEXT[c]}`,
     })
-    for (const h of heroes) if (h.hero!.side === side) h.hero!.rethink = 0
+    for (const h of heroes) if (h.hero!.side === side) h.hero!.followCoach = false
+    if (!callerOf(side))
+      comms.push({
+        t: clock,
+        side,
+        from: "coach",
+        caller: null,
+        text: `${CALL_TEXT[c]} — no caller alive, waiting`,
+        followers: 0,
+        total: 5,
+      })
+    return true
+  }
+
+  // --- live tactics commands ------------------------------------------------------------
+  /** Swap two players' lane slots (laning phase only, own 60 s cooldown). */
+  const swapLanes = (side: DraftSide, a: string, b: string): boolean => {
+    if (phase !== "laning" || swapCd[side] > 0 || winner || a === b) return false
+    const ha = heroes.find((x) => x.hero!.side === side && x.hero!.player.id === a)?.hero
+    const hb = heroes.find((x) => x.hero!.side === side && x.hero!.player.id === b)?.hero
+    if (!ha || !hb) return false
+    const t = tac[side]
+    tac[side] = {
+      ...t,
+      players: {
+        ...t.players,
+        [a]: { ...t.players[a]!, slot: hb.slot },
+        [b]: { ...t.players[b]!, slot: ha.slot },
+      },
+    }
+    ;[ha.slot, hb.slot] = [hb.slot, ha.slot]
+    ha.rethink = 0
+    hb.rethink = 0
+    swapCd[side] = SWAP_COOLDOWN
+    feed.push({
+      t: clock,
+      kind: "swap",
+      side,
+      text: `${side === "blue" ? draft.blue.tag : draft.red.tag} swap lanes: ${ha.player.name} ↔ ${hb.player.name}`,
+    })
+    return true
+  }
+
+  const PLAN_LABEL: Record<string, string> = {
+    standard: "Standard lanes",
+    aggressive: "Aggressive lanes",
+    roam: "Roam & gank",
+    scale: "Scale",
+    group: "Group & push",
+    split: "Split push",
+    pickoff: "Pick-offs",
+    farm: "Farm",
+    siege: "Siege",
+    roshan: "Roshan first",
+    defend: "Defend",
+  }
+  /** Change a phase plan: relayed by the IGL; once per 20 s per team. */
+  const setPlan = (side: DraftSide, which: Phase, plan: string): boolean => {
+    if (planCd[side] > 0 || winner) return false
+    const valid: Record<Phase, readonly string[]> = {
+      laning: ["standard", "aggressive", "roam", "scale"],
+      mid: ["group", "split", "pickoff", "farm"],
+      late: ["siege", "roshan", "defend"],
+    }
+    if (!valid[which].includes(plan)) return false
+    planCd[side] = PLAN_COOLDOWN
+    pendingPlans.push({
+      side,
+      at: clock + (relayDelay(side) ?? 0),
+      text: `${which[0]!.toUpperCase()}${which.slice(1)} plan: ${PLAN_LABEL[plan]}`,
+      apply: () => {
+        tac[side] = { ...tac[side], plans: { ...tac[side].plans, [which]: plan } }
+      },
+    })
+    return true
+  }
+  /** Standing orders — free, read at the player's next rethink. */
+  const setBehavior = (side: DraftSide, playerId: string, patch: Partial<Behavior>): boolean => {
+    const cur = tac[side].players[playerId]
+    if (!cur) return false
+    const next = normalizeTactics(draft, side, {
+      ...tac[side],
+      players: {
+        ...tac[side].players,
+        [playerId]: { ...cur, behavior: { ...cur.behavior, ...patch } },
+      },
+    })
+    tac[side] = next
+    return true
+  }
+  const setTeamTactics = (
+    side: DraftSide,
+    patch: Partial<Pick<TeamTactics, "shopTiming" | "spike" | "vision" | "igl">>,
+  ): boolean => {
+    tac[side] = normalizeTactics(draft, side, { ...tac[side], ...patch })
     return true
   }
 
@@ -1475,6 +2401,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const aliveMine = mine.filter((h) => h.alive).length
     const aliveTheirs = theirs.filter((h) => h.alive).length
     const style = (side === "blue" ? draft.blue : draft.red).style
+    // Adapt the late plan to the economy: behind → defend, ahead → siege.
+    if (phase !== "laning" && planCd[side] === 0) {
+      const lead = sideSum(side, netWorthOf) - sideSum(otherSide(side), netWorthOf)
+      const late = tac[side].plans.late
+      if (lead < -4000 && late !== "defend") setPlan(side, "late", "defend")
+      else if (lead > 3000 && late === "defend") setPlan(side, "late", "siege")
+    }
     if (clock < 4 * 60) return
     if (aliveTheirs <= 2 && aliveMine >= 4) call(side, "push")
     else if (aliveMine <= 2) call(side, "safe")
@@ -1507,6 +2440,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         heading: b.heading,
         hp: b.hp / b.maxHp,
         alive: b.alive,
+        attacks: b.swings ?? 0,
         ...(b.hero ? { label: heroName(b), hero: true } : {}),
       })
     }
@@ -1544,8 +2478,22 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       items: [...h.items],
       intent: h.intent,
       aegis: h.aegis,
+      netWorth: netWorthOf(h),
+      xp: Math.round(h.xp),
+      slot: h.slot,
+      following:
+        calls[h.side].active && relayAt[h.side] === null
+          ? h.followCoach
+          : iglCall[h.side]
+            ? h.followIgl
+            : null,
+      igl: tac[h.side].igl === h.player.id,
     }
   }
+  const sideSum = (side: DraftSide, f: (h: HeroState) => number) =>
+    heroes.filter((x) => x.hero!.side === side).reduce((s, x) => s + f(x.hero!), 0)
+  const roundSources = (r: Record<GoldSource, number>) =>
+    Object.fromEntries(GOLD_SOURCES.map((k) => [k, Math.round(r[k])])) as Record<GoldSource, number>
 
   const snapshot = (): MatchSnapshot => ({
     time: clock,
@@ -1566,6 +2514,32 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     calls: { blue: { ...calls.blue }, red: { ...calls.red } },
     roshanAlive: bodies.some((b) => b.alive && b.type === "roshan"),
     winner,
+    phase,
+    phaseAt: { ...phaseAt },
+    netWorth: { blue: sideSum("blue", netWorthOf), red: sideSum("red", netWorthOf) },
+    sources: { blue: roundSources(sources.blue), red: roundSources(sources.red) },
+    control: { ...control },
+    wards: wards.map((w) => ({
+      id: w.id,
+      side: w.side,
+      x: w.x,
+      z: w.z,
+      expiresIn: Math.max(0, w.expires - clock),
+    })),
+    wardStock: {
+      blue: { charges: wardStock.blue.charges, next: wardStock.blue.next },
+      red: { charges: wardStock.red.charges, next: wardStock.red.next },
+    },
+    comms: [...comms],
+    history: [...history],
+    purchases: [...purchases],
+    swapCooldown: { ...swapCd },
+    planCooldown: { ...planCd },
+    iglCall: {
+      blue: iglCall.blue ? { kind: iglCall.blue.kind, remaining: iglCall.blue.remaining } : null,
+      red: iglCall.red ? { kind: iglCall.red.kind, remaining: iglCall.red.remaining } : null,
+    },
+    synergy: { ...synergyScore },
   })
 
   const advance = (realDt: number) => {
@@ -1597,6 +2571,21 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       paused = p
     },
     snapshot,
+    swapLanes,
+    setPlan,
+    setBehavior,
+    setTeamTactics,
+    tactics: (side: DraftSide): TeamTactics => tac[side],
+    /** Raw sources (unrounded) — Σ equals Σ goldEarned (tests). */
+    goldAudit: () => ({
+      sources: { blue: { ...sources.blue }, red: { ...sources.red } },
+      earned: {
+        blue: sideSum("blue", (h) => h.goldEarned),
+        red: sideSum("red", (h) => h.goldEarned),
+      },
+    }),
+    /** Hero lane at this moment (tests). */
+    visibleTo: (side: DraftSide, x: number, z: number) => isVisible(visionGrid[side], { x, z }),
     castCounts: (): ReadonlyMap<string, number> => casts,
     /** Run to completion headlessly (tests, balance reports). */
     runToEnd: (limitSeconds = maxTime + 1) => {

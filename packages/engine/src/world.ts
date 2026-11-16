@@ -267,7 +267,7 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
       realClock += dt
       population.advance(dt)
       snapshot = population.units()
-      units.update(snapshot, camera.quaternion, showBars)
+      units.update(snapshot, camera.quaternion, showBars, dt)
       fxLayer.push(population.fx(), realClock)
       fxLayer.update(realClock)
       const next = population.structures?.() ?? []

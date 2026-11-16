@@ -5,6 +5,7 @@ import type { FlowEvent, Screen } from "./flow.ts"
 import { MatchScreen } from "./match-screen.tsx"
 import { PickTeam } from "./pick-team.tsx"
 import { ResultsScreen } from "./results-screen.tsx"
+import { TacticsBoard } from "./tactics-board/tactics-board.tsx"
 
 /** Renders the current Match Day screen over the map. Explore mode renders nothing here. */
 export const MatchDay = ({
@@ -25,6 +26,8 @@ export const MatchDay = ({
       return <PickTeam dispatch={dispatch} />
     case "draft":
       return <DraftScreen draft={screen.draft} you={screen.you} dispatch={dispatch} />
+    case "tactics":
+      return <TacticsBoard draft={screen.draft} you={screen.you} dispatch={dispatch} />
     case "match":
       return (
         <MatchScreen
@@ -33,6 +36,7 @@ export const MatchDay = ({
           draft={screen.draft}
           you={screen.you}
           seed={screen.seed}
+          tactics={screen.tactics}
           dispatch={dispatch}
         />
       )

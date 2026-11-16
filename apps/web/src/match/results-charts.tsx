@@ -1,331 +1,170 @@
-/** Results charts — gold-lead line over time with an objective timeline underneath. */
-import type { DraftSide, FeedEntry, HeroLine } from "@mobacraft/sim"
+/**
+ * Results charts — sim-owned economy history (NW + XP lead, phase bands, event
+ * ticks), item timeline per hero, gold sources and hero damage.
+ */
+import {
+  type DraftSide,
+  type DraftState,
+  type HeroLine,
+  type MatchSnapshot,
+  itemById,
+} from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
-import { useId, useMemo, useState } from "react"
-import { type GoldSample, goldK, parseKill } from "./hud-data.ts"
+import { Sparkles } from "lucide-react"
+import { useMemo } from "react"
+import { leadMarkers, leadSeries, phaseBands } from "./hud-data.ts"
+import { ItemSlot } from "./item-icon.tsx"
+import { NetWorthBars, SourceBars } from "./live/economy-bars.tsx"
+import { LeadChart } from "./live/lead-chart.tsx"
 import { HeroGem, clockText } from "./ui.tsx"
 
-const W = 640
-const H = 128
-const PAD_L = 40
-const PAD_R = 10
-const PAD_Y = 12
-const TL_H = 56
-
-type Marker = {
-  readonly t: number
-  readonly kind: "kill" | "tower" | "rax" | "roshan" | "ancient"
-  readonly mine: boolean | null
-  readonly label: string
-}
-
-const MARK_LABEL: Record<Marker["kind"], string> = {
-  kill: "Kills",
-  tower: "Towers",
-  rax: "Barracks",
-  roshan: "Roshan",
-  ancient: "Ancient",
-}
-
-const niceStep = (max: number) => {
-  for (const s of [500, 1000, 2000, 5000, 10000, 20000]) if (max / s <= 3) return s
-  return 50000
-}
-
-export const GoldGraph = ({
-  samples,
-  feed,
-  heroes,
-  you,
-  duration,
-}: {
-  samples: readonly GoldSample[]
-  feed: readonly FeedEntry[]
-  heroes: readonly HeroLine[]
-  you: DraftSide
-  duration: number
-}) => {
-  const uid = useId().replaceAll(":", "")
-  const [hover, setHover] = useState<number | null>(null)
-  const them: DraftSide = you === "blue" ? "red" : "blue"
-  const pts = useMemo(
-    () => samples.map((s) => ({ t: s.t, lead: s[you] - s[them] })),
-    [samples, you, them],
-  )
-  const tMax = Math.max(1, duration, pts.at(-1)?.t ?? 0)
-  const peak = Math.max(500, ...pts.map((p) => Math.abs(p.lead)))
-  const step = niceStep(peak)
-  const yMax = Math.ceil(peak / step) * step
-  const x = (t: number) => PAD_L + (t / tMax) * (W - PAD_L - PAD_R)
-  const y = (v: number) => PAD_Y + ((yMax - v) / (2 * yMax)) * (H - 2 * PAD_Y)
-  const line = pts
-    .map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.lead).toFixed(1)}`)
-    .join("")
-  const area =
-    pts.length > 1
-      ? `${line}L${x(pts.at(-1)!.t).toFixed(1)},${y(0)}L${x(pts[0]!.t).toFixed(1)},${y(0)}Z`
-      : ""
-
-  const markers = useMemo<Marker[]>(
-    () =>
-      feed.flatMap((f): Marker[] => {
-        const mine = f.side === "neutral" ? null : f.side === you
-        switch (f.kind) {
-          case "kill":
-          case "first-blood": {
-            const k = parseKill(f, heroes)
-            const text = k?.killer
-              ? `${k.killer.playerName} slew ${k.victim?.playerName ?? "a hero"}`
-              : f.text
-            return [{ t: f.t, kind: "kill", mine, label: text }]
-          }
-          case "tower":
-          case "rax":
-          case "roshan":
-          case "ancient":
-            return [{ t: f.t, kind: f.kind, mine, label: f.text }]
-          default:
-            return []
-        }
-      }),
-    [feed, heroes, you],
-  )
-
-  const ticks = Array.from({ length: Math.floor(tMax / 300) + 1 }, (_, i) => i * 300)
-  const final = pts.at(-1)?.lead ?? 0
-  const maxLead = Math.max(0, ...pts.map((p) => p.lead))
-  const maxDeficit = Math.min(0, ...pts.map((p) => p.lead))
-  const summary = `Gold lead over time. Your largest lead ${goldK(maxLead)}, largest deficit ${goldK(-maxDeficit)}, final ${final >= 0 ? "+" : "−"}${goldK(Math.abs(final))}.`
-  const hv = hover === null ? null : pts[hover]
-
-  const rowY: Record<Marker["kind"], number> = {
-    kill: 10,
-    tower: 22,
-    rax: 22,
-    roshan: 34,
-    ancient: 34,
-  }
-
-  const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
-    const r = e.currentTarget.getBoundingClientRect()
-    const t = ((((e.clientX - r.left) / r.width) * W - PAD_L) / (W - PAD_L - PAD_R)) * tMax
-    let best = 0
-    for (let i = 0; i < pts.length; i++)
-      if (Math.abs(pts[i]!.t - t) < Math.abs(pts[best]!.t - t)) best = i
-    setHover(pts.length ? best : null)
-  }
-
-  if (pts.length < 2) {
+/** Net-worth and XP lead from `final.history`, with phase bands and event ticks. */
+export const EconomyGraphs = ({ final, you }: { final: MatchSnapshot; you: DraftSide }) => {
+  const series = useMemo(() => leadSeries(final, you), [final, you])
+  const bands = useMemo(() => phaseBands(final.phaseAt ?? {}, final.time), [final])
+  const markers = useMemo(() => leadMarkers(final.feed, final.heroes, you), [final, you])
+  if (series.length < 2) {
     return (
       <p className="rounded-xl border border-white/[0.07] p-4 text-[12px] text-white/45">
-        No gold history was recorded for this match.
+        No economy history was recorded for this match.
       </p>
     )
   }
-
   return (
-    <figure className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
-      <figcaption className="mb-1 flex items-center gap-3 text-[11px] text-white/55">
-        <span className="font-semibold tracking-[0.18em] text-white/70 uppercase">Gold lead</span>
-        <span className="flex items-center gap-1">
-          <span className="h-2 w-3 rounded-sm bg-radiant/60" aria-hidden /> You ahead
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="h-2 w-3 rounded-sm bg-dire/60" aria-hidden /> Opponent ahead
-        </span>
-        <span className="ml-auto font-mono tabular-nums">
-          {hv ? (
-            <>
-              {clockText(hv.t)} ·{" "}
-              <span className={hv.lead >= 0 ? "text-radiant" : "text-dire"}>
-                {hv.lead >= 0 ? "+" : "−"}
-                {goldK(Math.abs(hv.lead))}
-              </span>
-            </>
-          ) : (
-            <>
-              final{" "}
-              <span className={final >= 0 ? "text-radiant" : "text-dire"}>
-                {final >= 0 ? "+" : "−"}
-                {goldK(Math.abs(final))}
-              </span>
-            </>
-          )}
-        </span>
-      </figcaption>
-      <svg
-        viewBox={`0 0 ${W} ${H + TL_H}`}
-        className="block h-auto w-full touch-none"
-        aria-hidden
-        onPointerMove={onMove}
-        onPointerLeave={() => setHover(null)}
-      >
-        <defs>
-          <clipPath id={`${uid}-up`}>
-            <rect x={0} y={0} width={W} height={y(0)} />
-          </clipPath>
-          <clipPath id={`${uid}-down`}>
-            <rect x={0} y={y(0)} width={W} height={H} />
-          </clipPath>
-          <linearGradient id={`${uid}-g`} x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="var(--color-radiant)" stopOpacity={0.45} />
-            <stop offset="50%" stopColor="var(--color-radiant)" stopOpacity={0.05} />
-            <stop offset="50%" stopColor="var(--color-dire)" stopOpacity={0.05} />
-            <stop offset="100%" stopColor="var(--color-dire)" stopOpacity={0.45} />
-          </linearGradient>
-        </defs>
-        {/* grid */}
-        {[-yMax, -yMax / 2, 0, yMax / 2, yMax].map((v) => (
-          <g key={v}>
-            <line
-              x1={PAD_L}
-              x2={W - PAD_R}
-              y1={y(v)}
-              y2={y(v)}
-              stroke="white"
-              strokeOpacity={v === 0 ? 0.28 : 0.06}
-              strokeDasharray={v === 0 ? undefined : "2 4"}
-            />
-            <text
-              x={PAD_L - 6}
-              y={y(v) + 3}
-              textAnchor="end"
-              className="fill-white/40 text-[9px] tabular-nums"
-            >
-              {v === 0 ? "0" : `${v > 0 ? "+" : "−"}${goldK(Math.abs(v))}`}
-            </text>
-          </g>
-        ))}
-        {ticks.map((t) => (
-          <text
-            key={t}
-            x={x(t)}
-            y={H + TL_H - 2}
-            textAnchor="middle"
-            className="fill-white/35 text-[9px] tabular-nums"
-          >
-            {clockText(t)}
-          </text>
-        ))}
-        <path d={area} fill={`url(#${uid}-g)`} />
-        <path
-          d={line}
-          fill="none"
-          stroke="var(--color-radiant)"
-          strokeWidth={1.8}
-          clipPath={`url(#${uid}-up)`}
-          strokeLinejoin="round"
-        />
-        <path
-          d={line}
-          fill="none"
-          stroke="var(--color-dire)"
-          strokeWidth={1.8}
-          clipPath={`url(#${uid}-down)`}
-          strokeLinejoin="round"
-        />
-        {hv ? (
-          <g>
-            <line
-              x1={x(hv.t)}
-              x2={x(hv.t)}
-              y1={PAD_Y}
-              y2={H + TL_H - 12}
-              stroke="white"
-              strokeOpacity={0.25}
-            />
-            <circle
-              cx={x(hv.t)}
-              cy={y(hv.lead)}
-              r={3.5}
-              fill={hv.lead >= 0 ? "var(--color-radiant)" : "var(--color-dire)"}
-              stroke="black"
-            />
-          </g>
-        ) : null}
-
-        {/* objective timeline */}
-        <g transform={`translate(0 ${H})`}>
-          {(["kill", "tower", "roshan"] as const).map((k) => (
-            <text
-              key={k}
-              x={PAD_L - 6}
-              y={rowY[k] + 3}
-              textAnchor="end"
-              className="fill-white/40 text-[8.5px]"
-            >
-              {k === "tower" ? "Bldg" : MARK_LABEL[k]}
-            </text>
-          ))}
-          <line
-            x1={PAD_L}
-            x2={W - PAD_R}
-            y1={rowY.kill}
-            y2={rowY.kill}
-            stroke="white"
-            strokeOpacity={0.05}
-          />
-          <line
-            x1={PAD_L}
-            x2={W - PAD_R}
-            y1={rowY.tower}
-            y2={rowY.tower}
-            stroke="white"
-            strokeOpacity={0.05}
-          />
-          <line
-            x1={PAD_L}
-            x2={W - PAD_R}
-            y1={rowY.roshan}
-            y2={rowY.roshan}
-            stroke="white"
-            strokeOpacity={0.05}
-          />
-          {markers.map((m, i) => {
-            const cx = x(m.t)
-            const cy = rowY[m.kind]
-            const fill =
-              m.mine === null ? "#b794ff" : m.mine ? "var(--color-radiant)" : "var(--color-dire)"
-            return (
-              // oxlint-disable-next-line react/no-array-index-key -- feed order is stable
-              <g key={i}>
-                <title>{`${clockText(m.t)} — ${m.label}`}</title>
-                {m.kind === "kill" ? (
-                  <circle cx={cx} cy={cy} r={2.4} fill={fill} fillOpacity={0.85} />
-                ) : m.kind === "tower" || m.kind === "rax" ? (
-                  <rect
-                    x={cx - 3}
-                    y={cy - 4}
-                    width={6}
-                    height={8}
-                    rx={1}
-                    fill={fill}
-                    stroke="black"
-                    strokeOpacity={0.5}
-                  />
-                ) : (
-                  <path
-                    d={`M${cx},${cy - 5}L${cx + 5},${cy}L${cx},${cy + 5}L${cx - 5},${cy}Z`}
-                    fill={m.kind === "ancient" ? "#fcd34d" : fill}
-                    stroke="black"
-                    strokeOpacity={0.5}
-                  />
-                )}
-              </g>
-            )
-          })}
-        </g>
-      </svg>
-      <p className="sr-only">{summary}</p>
-      <p className="mt-1 flex flex-wrap gap-x-3 text-[10px] text-white/40">
-        <span>● kill</span>
-        <span>▮ tower / barracks</span>
-        <span>◆ Roshan · Ancient</span>
-        <span className="ml-auto">Hover the chart for exact values</span>
+    <div className="flex flex-col gap-2 rounded-xl border border-white/[0.07] bg-black/20 p-3">
+      <LeadChart
+        title="Net-worth lead"
+        points={series.map((p) => ({ t: p.t, v: p.nw }))}
+        bands={bands}
+        markers={markers}
+        duration={final.time}
+        width={640}
+        height={120}
+      />
+      <LeadChart
+        title="XP lead"
+        unit="xp"
+        points={series.map((p) => ({ t: p.t, v: p.xp }))}
+        bands={bands}
+        duration={final.time}
+        width={640}
+        height={64}
+      />
+      <p className="flex flex-wrap gap-x-3 text-[10px] text-white/40">
+        <span className="text-radiant">▲ you ahead</span>
+        <span className="text-dire">▼ opponent ahead</span>
+        <span>● kill · ▮ building · ◆ Roshan/Ancient · ┊ phase change</span>
+        <span className="ml-auto">Hover for exact values</span>
       </p>
-    </figure>
+    </div>
   )
 }
+
+/** When each of your heroes bought each item; adaptive picks are marked. */
+export const ItemTimeline = ({ final, you }: { final: MatchSnapshot; you: DraftSide }) => {
+  const mine = final.heroes.filter((h) => h.side === you)
+  const tMax = Math.max(60, final.time)
+  const buys = final.purchases ?? []
+  return (
+    <section
+      aria-label="Item timeline"
+      className="rounded-xl border border-white/[0.07] bg-black/20 p-3"
+    >
+      <p className="mb-2 flex items-center gap-2 text-[11px] font-semibold tracking-[0.18em] text-white/70 uppercase">
+        Item timeline
+        <span className="flex items-center gap-1 font-normal tracking-normal text-white/45 normal-case">
+          <Sparkles className="size-3 text-sky-200" aria-hidden /> adaptive pick
+        </span>
+      </p>
+      <ul className="flex flex-col gap-1.5">
+        {mine.map((h) => {
+          const own = buys.filter((b) => b.side === you && b.playerId === h.playerId)
+          return (
+            <li key={h.id} className="grid grid-cols-[96px_1fr] items-center gap-2">
+              <span className="flex min-w-0 items-center gap-1.5 text-[11px]">
+                <HeroGem heroId={h.heroId} size={18} className="rounded-md" />
+                <span className="truncate">{h.playerName}</span>
+              </span>
+              <ol
+                className="relative h-6 rounded-md bg-white/[0.03]"
+                aria-label={`${h.playerName}: ${
+                  own.length
+                    ? own
+                        .map(
+                          (b) =>
+                            `${itemById(b.itemId).name} at ${clockText(b.t)}${b.adaptive ? " (adaptive)" : ""}`,
+                        )
+                        .join(", ")
+                    : "no purchases"
+                }`}
+              >
+                {own.map((b, i) => (
+                  <li
+                    // oxlint-disable-next-line react/no-array-index-key -- purchases are append-only
+                    key={i}
+                    className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2"
+                    style={{ left: `${(b.t / tMax) * 100}%` }}
+                    title={`${clockText(b.t)} · ${itemById(b.itemId).name}${b.adaptive ? " · adaptive" : ""}`}
+                  >
+                    <span
+                      className={cn(
+                        "block rounded-[6px]",
+                        b.adaptive &&
+                          "ring-2 ring-sky-300/80 ring-offset-1 ring-offset-neutral-950",
+                      )}
+                    >
+                      <ItemSlot id={b.itemId} size={18} />
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </li>
+          )
+        })}
+      </ul>
+      <p className="mt-1.5 flex justify-between pl-[104px] text-[9px] tabular-nums text-white/35">
+        <span>0:00</span>
+        <span>{clockText(tMax / 2)}</span>
+        <span>{clockText(tMax)}</span>
+      </p>
+    </section>
+  )
+}
+
+/** Gold by source per team + final net worth per hero. */
+export const GoldBreakdown = ({
+  final,
+  draft,
+  you,
+}: {
+  final: MatchSnapshot
+  draft: DraftState
+  you: DraftSide
+}) => (
+  <section
+    aria-label="Gold breakdown"
+    className="flex flex-col gap-3 rounded-xl border border-white/[0.07] bg-black/20 p-3"
+  >
+    <div>
+      <p className="mb-2 text-[11px] font-semibold tracking-[0.18em] text-white/70 uppercase">
+        Gold sources
+      </p>
+      {final.sources ? (
+        <SourceBars
+          sources={final.sources}
+          you={you}
+          names={{ blue: draft.blue.name, red: draft.red.name }}
+        />
+      ) : null}
+    </div>
+    <div>
+      <p className="mb-2 text-[11px] font-semibold tracking-[0.18em] text-white/70 uppercase">
+        Net worth
+      </p>
+      <NetWorthBars heroes={final.heroes} you={you} />
+    </div>
+  </section>
+)
 
 /** Horizontal hero-damage bars for all ten players, grouped by side. */
 export const DamageBars = ({

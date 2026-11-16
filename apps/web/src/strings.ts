@@ -150,6 +150,9 @@ export const INTENT_LABEL: Record<string, string> = {
   retreat: "Retreat",
   roshan: "Roshan",
   group: "Group",
+  gank: "Gank",
+  ward: "Ward",
+  shop: "Shop",
   dead: "Dead",
 }
 
@@ -166,6 +169,27 @@ export const ANNOUNCER: Record<string, string> = {
   aegis: "Reincarnated",
   wipe: "Team Wipe",
   ancient: "Ancient Under Attack",
+  "phase-mid": "Mid Game",
+  "phase-late": "Late Game",
+}
+
+/** spec/06 game phases (MatchSnapshot.phase). */
+export const PHASE_LABEL: Record<string, string> = {
+  laning: "Laning",
+  mid: "Mid game",
+  late: "Late game",
+}
+
+/** spec/06 gold sources (MatchSnapshot.sources). */
+export const SOURCE_LABEL: Record<string, string> = {
+  passive: "Passive",
+  creeps: "Creeps",
+  neutrals: "Neutrals",
+  kills: "Kills",
+  assists: "Assists",
+  structures: "Buildings",
+  roshan: "Roshan",
+  wards: "Dewards",
 }
 
 /** Help popover rows: keys (each rendered as a key cap) → action. */

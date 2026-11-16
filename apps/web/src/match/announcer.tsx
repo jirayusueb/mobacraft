@@ -5,6 +5,7 @@ import {
   Castle,
   Droplet,
   Flame,
+  Hourglass,
   type LucideIcon,
   ShieldPlus,
   Siren,
@@ -25,6 +26,7 @@ const ICON: Record<BannerKind, LucideIcon> = {
   aegis: ShieldPlus,
   wipe: Swords,
   ancient: Siren,
+  phase: Hourglass,
 }
 
 /** Visible time per banner; shortened when more are waiting. */

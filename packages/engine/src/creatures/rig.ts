@@ -42,6 +42,9 @@ export interface BoundPart {
   readonly joint?: JointKind | undefined
 }
 
+/** Joint kinds that only take parts which ask for them by name (`joint`). */
+const PINNED: ReadonlySet<JointKind> = new Set(["wing", "lever"])
+
 /** Parts / joints this close to x = 0 count as centred (match either side). */
 const CENTRE = 0.02
 
@@ -67,7 +70,7 @@ export const jointFor = (part: BoundPart, joints: readonly Joint[]): Joint | nul
   let bestD = Number.POSITIVE_INFINITY
   for (const j of joints) {
     if (j.limb !== part.limb) continue
-    if (part.joint && j.kind !== part.joint) continue
+    if (part.joint ? j.kind !== part.joint : PINNED.has(j.kind)) continue
     const sameSide =
       Math.abs(j.at[0]) < CENTRE ||
       Math.abs(c[0]) < CENTRE ||
@@ -100,6 +103,20 @@ export const bindJoints = (parts: readonly BoundPart[], joints: readonly Joint[]
       new Float32BufferAttribute(new Float32Array(n).fill(j ? BONE[j.kind] : 0), 1),
     )
   }
+}
+
+/** Mean hip height of the leg joints (0 = no legs: wheels, floating spirits). */
+export const hipHeight = (g: BufferGeometry): number => {
+  const p = g.getAttribute("pivot")
+  const bone = g.getAttribute("bone")
+  let sum = 0
+  let n = 0
+  for (let i = 0; i < bone.count; i++)
+    if (bone.getX(i) === BONE.leg) {
+      sum += p.getY(i)
+      n++
+    }
+  return n ? sum / n : 0
 }
 
 /** Keep pivots in step with a whole-geometry translate / uniform scale. */

@@ -18,6 +18,7 @@ import { Button, Panel, cn } from "@mobacraft/ui"
 import { Ban, Check, Swords } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 import type { FlowEvent } from "./flow.ts"
+import { CandidateFit, MatrixDialog, SynergyMeter, TagChips } from "./synergy-panel.tsx"
 import { HeroGem, ROLE_ICON, ROLE_LABEL, TeamCrest } from "./ui.tsx"
 
 const ROLES: readonly (Role | "all")[] = ["all", "carry", "mid", "offlane", "jungle", "support"]
@@ -153,7 +154,10 @@ export const DraftScreen = ({
                 </span>
               ) : null}
             </h1>
-            <div className="ml-auto flex gap-1" role="tablist" aria-label="Filter by role">
+            <div className="ml-auto">
+              <MatrixDialog />
+            </div>
+            <div className="flex gap-1" role="tablist" aria-label="Filter by role">
               {ROLES.map((r) => (
                 <button
                   key={r}
@@ -227,10 +231,10 @@ export const DraftScreen = ({
                     {preview.name}{" "}
                     <span className="font-normal text-white/50">· {preview.title}</span>
                   </p>
-                  <p className="mt-0.5 text-[11px] text-white/55">
-                    {preview.attack === "melee" ? "Melee" : "Ranged"} ·{" "}
-                    {effectSummary(preview).join(" · ")}
-                  </p>
+                  <div className="mt-1 flex items-center gap-2 text-[11px] text-white/55">
+                    {preview.attack === "melee" ? "Melee" : "Ranged"}
+                    <TagChips heroId={preview.id} />
+                  </div>
                   <p className="mt-1.5 text-[12px] text-white/75">
                     <span className="font-medium text-white">{preview.skill.name}</span> ·{" "}
                     <span className="font-medium text-amber-200">{preview.ultimate.name}</span>{" "}
@@ -247,6 +251,9 @@ export const DraftScreen = ({
                         "Doubles up on what your lineup already has."
                       )}
                     </p>
+                  ) : null}
+                  {!taken.has(preview.id) ? (
+                    <CandidateFit heroId={preview.id} state={state} you={you} />
                   ) : null}
                 </div>
                 {previewPlayer ? (
@@ -313,6 +320,7 @@ const SideColumn = ({
         {you ? "You" : "Opponent"}
       </p>
       <p className="-mt-1 text-sm font-semibold text-white">{title}</p>
+      <SynergyMeter heroIds={picks.map((p) => p.heroId)} label={title} />
       <div className="flex gap-1.5" aria-label="Bans">
         {[0, 1].map((i) => (
           <span

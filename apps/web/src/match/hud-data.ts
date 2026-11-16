@@ -1,11 +1,19 @@
-import { ROSHAN_RESPAWN } from "@mobacraft/sim"
 /**
  * Client-side derivations for the Match Day HUD — everything the snapshot
  * doesn't carry directly: feed parsing (who killed whom), announcer events
- * (multi-kills, wipes, Ancient under attack) and a sampled gold history.
- * Pure functions + one small mutable tracker; no React here.
+ * (multi-kills, wipes, Ancient under attack, phase changes), lead series and
+ * comms formatting. Pure functions + one small mutable tracker; no React here.
  */
-import type { DraftSide, FeedEntry, HeroLine, MatchSnapshot } from "@mobacraft/sim"
+import {
+  type CommsEntry,
+  type DraftSide,
+  type FeedEntry,
+  type HeroLine,
+  type MatchSnapshot,
+  PHASES,
+  type Phase,
+  ROSHAN_RESPAWN,
+} from "@mobacraft/sim"
 import { ANNOUNCER } from "../strings.ts"
 
 // --- history -------------------------------------------------------------------------
@@ -16,41 +24,131 @@ export interface GoldSample {
   readonly red: number
 }
 
-/** What the match screen records for the results screen. */
+/**
+ * Legacy UI-side history (spec/05). The sim now owns history (`snapshot.history`,
+ * spec/06 §4); the results screen reads `final.history` and ignores this.
+ */
 export interface MatchHistory {
   readonly gold: readonly GoldSample[]
 }
 
-/** Minimum game seconds between gold samples (keeps a 30-min match under ~2k points). */
-export const SAMPLE_EVERY = 1
+/** One point of the lead graphs: your side minus theirs. */
+export interface LeadPoint {
+  readonly t: number
+  /** Net-worth lead. */
+  readonly nw: number
+  /** Total-XP lead. */
+  readonly xp: number
+}
 
-const sampleOf = (snap: MatchSnapshot): GoldSample => ({
-  t: snap.time,
-  blue: snap.gold.blue,
-  red: snap.gold.red,
-})
+const sideXp = (heroes: readonly HeroLine[], side: DraftSide) =>
+  heroes.filter((h) => h.side === side).reduce((s, h) => s + h.xp, 0)
 
-/** Team gold over game time, sampled at most every `SAMPLE_EVERY` seconds. */
-export class GoldHistory {
-  readonly #samples: GoldSample[] = []
-
-  get samples(): readonly GoldSample[] {
-    return this.#samples
+/**
+ * Lead series from the sim's 5 s history, plus the live moment (so the line
+ * always reaches "now" between samples).
+ */
+export const leadSeries = (snap: MatchSnapshot, you: DraftSide): LeadPoint[] => {
+  const them = otherSide(you)
+  const pts: LeadPoint[] = (snap.history ?? []).map((s) => ({
+    t: s.t,
+    nw: s.nw[you] - s.nw[them],
+    xp: s.xp[you] - s.xp[them],
+  }))
+  const last = pts.at(-1)
+  if (snap.netWorth && (!last || snap.time - last.t >= 0.5)) {
+    pts.push({
+      t: snap.time,
+      nw: snap.netWorth[you] - snap.netWorth[them],
+      xp: Math.round(sideXp(snap.heroes, you) - sideXp(snap.heroes, them)),
+    })
   }
+  return pts
+}
 
-  /** Records `snap` unless the last sample is too recent. */
-  sample(snap: MatchSnapshot): void {
-    const last = this.#samples.at(-1)
-    if (last && snap.time - last.t < SAMPLE_EVERY) return
-    this.#samples.push(sampleOf(snap))
-  }
+export interface PhaseBand {
+  readonly phase: Phase
+  readonly from: number
+  readonly to: number
+}
 
-  /** Records the final state unconditionally (unless already at that time) and freezes a copy. */
-  finish(snap: MatchSnapshot): MatchHistory {
-    const last = this.#samples.at(-1)
-    if (!last || last.t < snap.time) this.#samples.push(sampleOf(snap))
-    return { gold: [...this.#samples] }
-  }
+/** Contiguous phase spans [from, to) up to `end`, from the sim's `phaseAt`. */
+export const phaseBands = (
+  phaseAt: Readonly<Partial<Record<Phase, number>>>,
+  end: number,
+): PhaseBand[] => {
+  const starts = PHASES.flatMap((p) => {
+    const at = p === "laning" ? (phaseAt[p] ?? 0) : phaseAt[p]
+    return at === undefined ? [] : [{ phase: p, at }]
+  })
+  return starts.map((s, i) => ({
+    phase: s.phase,
+    from: s.at,
+    to: Math.max(s.at, starts[i + 1]?.at ?? end),
+  }))
+}
+
+export type MarkerKind = "kill" | "tower" | "rax" | "roshan" | "ancient" | "phase"
+
+export interface Marker {
+  readonly t: number
+  readonly kind: MarkerKind
+  /** Good news for you (true), them (false), or nobody (null). */
+  readonly mine: boolean | null
+  readonly label: string
+}
+
+/** Event ticks for the lead graphs, from the match feed. */
+export const leadMarkers = (
+  feed: readonly FeedEntry[],
+  heroes: readonly HeroLine[],
+  you: DraftSide,
+): Marker[] =>
+  feed.flatMap((f): Marker[] => {
+    const mine = f.side === "neutral" ? null : f.side === you
+    switch (f.kind) {
+      case "kill":
+      case "first-blood": {
+        const k = parseKill(f, heroes)
+        const text = k?.killer
+          ? `${k.killer.playerName} slew ${k.victim?.playerName ?? "a hero"}`
+          : f.text
+        return [{ t: f.t, kind: "kill", mine, label: text }]
+      }
+      case "tower":
+      case "rax":
+      case "roshan":
+      case "ancient":
+      case "phase":
+        return [{ t: f.t, kind: f.kind, mine, label: f.text }]
+      default:
+        return []
+    }
+  })
+
+/** "+1.2k" / "−0.4k" / "0" — a signed lead in thousands. */
+export const signedK = (n: number) =>
+  Math.abs(n) < 50 ? "0" : `${n > 0 ? "+" : "−"}${goldK(Math.abs(n))}`
+
+// --- comms ------------------------------------------------------------------------------
+
+/** "Coach → Mae (IGL): "Group up!" · 4/5 following" — one comms log line. */
+export const commsText = (c: CommsEntry, heroes: readonly HeroLine[]): string => {
+  const isIgl = heroes.some((h) => h.side === c.side && h.igl && h.playerName === c.caller)
+  const who = c.caller ? `${c.caller} (${isIgl ? "IGL" : "backup"})` : null
+  const head = c.from === "coach" ? (who ? `Coach → ${who}` : "Coach") : (who ?? "IGL")
+  const tail = c.caller
+    ? ` · ${c.followers}/${c.total} following`
+    : /no caller/i.test(c.text)
+      ? ""
+      : " · no caller alive"
+  return `${head}: "${c.text}"${tail}`
+}
+
+/** True when every hero on `side` is dead (calls wait for the first respawn). */
+export const noCallerAlive = (heroes: readonly HeroLine[], side: DraftSide) => {
+  const team = heroes.filter((h) => h.side === side)
+  return team.length > 0 && team.every((h) => !h.alive)
 }
 
 // --- feed parsing ----------------------------------------------------------------------
@@ -112,6 +210,7 @@ export type BannerKind =
   | "aegis"
   | "wipe"
   | "ancient"
+  | "phase"
 
 export interface Banner {
   readonly id: number
@@ -258,6 +357,17 @@ export class AnnouncerTracker {
           detail: h ? `${label(h)} rises with the Aegis` : "The Aegis is spent",
           heroId: h?.heroId,
           priority: 4,
+        })
+        break
+      }
+      case "phase": {
+        const late = f.text.startsWith("Late")
+        this.#add({
+          kind: "phase",
+          side: "neutral",
+          title: ANNOUNCER[late ? "phase-late" : "phase-mid"]!,
+          detail: f.text.split(" — ")[1] ?? f.text,
+          priority: 6,
         })
         break
       }

@@ -10,6 +10,8 @@ export interface Player {
   readonly skill: number
   /** Positioning / decision making: retreat timing, target choice, dodging. */
   readonly sense: number
+  /** Shotcalling: relay speed and how much teammates follow this player's calls (1..20). */
+  readonly leadership: number
   /** Hero mastery 0..1 by hero id; unlisted heroes = 0.35. */
   readonly mastery: Readonly<Record<string, number>>
 }
@@ -38,8 +40,33 @@ const p = (
   role,
   skill,
   sense,
+  leadership: LEADERSHIP[id] ?? 10,
   mastery,
 })
+
+/** Shotcalling ratings (spec/06 §5). One natural caller per team. */
+const LEADERSHIP: Readonly<Record<string, number>> = {
+  "lnt-bram": 9,
+  "lnt-osk": 12,
+  "lnt-hild": 11,
+  "lnt-ivo": 8,
+  "lnt-mae": 17,
+  "emb-kas": 8,
+  "emb-rhee": 14,
+  "emb-tor": 12,
+  "emb-yuki": 10,
+  "emb-lio": 9,
+  "mir-ada": 10,
+  "mir-sol": 16,
+  "mir-kell": 13,
+  "mir-pim": 9,
+  "mir-wren": 12,
+  "hvl-nox": 11,
+  "hvl-sable": 10,
+  "hvl-grey": 16,
+  "hvl-rook": 8,
+  "hvl-vey": 13,
+}
 
 export const TEAMS: readonly TeamDef[] = [
   {

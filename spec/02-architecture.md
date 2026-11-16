@@ -86,3 +86,15 @@ resources — so React's effect cleanup is one `Scope.close`.
 - Engine draws heroes from `creatures/kit-hero.ts` through the same instanced creature path; destroyed
   structures collapse in the baked meshes via a `structureAlive` uniform array (no draw-call cost) plus rubble.
 - Web: `apps/web/src/match/*` — flow reducer (explore → pick-team → draft → match → results) and screens.
+
+## Tactics & Coaching (milestone 3, spec/06)
+
+- New pure sim modules: `match/matrix.ts` (tags derived from ability data → synergy/counter/matchup),
+  `match/tactics.ts` (TeamTactics data, defaults, `aiTactics`, `normalizeTactics`, lane preview,
+  build presets), `match/vision.ts` (2-tile visibility grid, ward spots from map data).
+- `createMatch(map, draft, { tactics })` owns phases, vision/wards, IGL relay, gold-by-source and a
+  5 s history; live commands `swapLanes / setPlan / setBehavior / setTeamTactics`. Every random roll
+  (call compliance) uses the match's seeded stream, so determinism holds with live commands.
+- The snapshot is the HUD's only source (net worth, history, comms, wards); the results graph reads
+  `final.history`, not UI-side sampling. Population seam unchanged (no 3D wards / fog this slice).
+- Web: flow `draft → tactics → match`; the minimap ward overlay is SVG with team CSS tokens.

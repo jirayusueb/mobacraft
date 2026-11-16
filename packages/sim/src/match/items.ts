@@ -14,6 +14,18 @@ export interface Item {
   /** Multiplies ability damage and healing. */
   readonly power?: number
   readonly lifesteal?: number
+  /** Fraction of magic damage ignored, e.g. 0.2. */
+  readonly magicResist?: number
+  /** Magic resist granted to the holder and allies within 6 tiles (one per team counts). */
+  readonly auraMagicResist?: number
+  /** Basic attacks can't miss (pierces Evasion). */
+  readonly trueStrike?: boolean
+  /** The first engage ability each fight reaches 10 tiles. */
+  readonly blink?: boolean
+  /** Lost when the holder dies. */
+  readonly dropOnDeath?: boolean
+  /** Seconds of Spell Immunity when a fight starts (60 s cooldown). */
+  readonly spellImmunity?: number
 }
 
 export const ITEMS: readonly Item[] = [
@@ -27,6 +39,13 @@ export const ITEMS: readonly Item[] = [
   { id: "staff", name: "Voidglass Staff", cost: 1600, power: 0.35, hp: 120 },
   { id: "charm", name: "Moon Charm", cost: 900, hp: 150, power: 0.12 },
   { id: "aegis-cloak", name: "Warden's Cloak", cost: 1400, hp: 260, armor: 4, power: 0.1 },
+  { id: "nullstone", name: "Nullstone Amulet", cost: 1300, hp: 150, magicResist: 0.2 },
+  // Situational items bought by the rule engine (spec/07 §4b, builds.ts).
+  { id: "pipe", name: "Pipe of Insight", cost: 1700, hp: 150, auraMagicResist: 0.25 },
+  { id: "blink", name: "Blink Dagger", cost: 1600, blink: true },
+  { id: "mkb", name: "Monkey King Bar", cost: 2200, damage: 30, trueStrike: true },
+  { id: "rapier", name: "Divine Rapier", cost: 3600, damage: 110, dropOnDeath: true },
+  { id: "bkb", name: "Black King Bar", cost: 2400, damage: 10, hp: 100, spellImmunity: 6 },
 ]
 
 export const itemById = (id: string): Item => {

@@ -27,6 +27,8 @@ export interface Unit {
   /** Display name for cards (e.g. "Ember Witch · Vex"). */
   readonly label?: string
   readonly hero?: boolean
+  /** Attacks / casts started so far; an increase plays the attack swing. Omitted → 0. */
+  readonly attacks?: number
 }
 
 export interface StructureStatus {

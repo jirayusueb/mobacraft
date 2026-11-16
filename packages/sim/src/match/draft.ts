@@ -5,6 +5,7 @@
  * Each pick is assigned to one of that side's players (by role, then mastery).
  */
 import { HEROES, type HeroDef, type Role, heroDef } from "./heroes.ts"
+import { draftFit } from "./matrix.ts"
 import { type Player, type TeamDef, masteryOf } from "./teams.ts"
 
 export type DraftSide = "blue" | "red"
@@ -133,7 +134,18 @@ const pickValue = (d: DraftState, side: DraftSide, hero: HeroDef) => {
   return comfort + styleBonus
 }
 
-/** Value of denying a hero from the *enemy* of `side`. */
+/** Draft-fit term (spec/06): ±0.2 at most, so player comfort still dominates. */
+const fitValue = (d: DraftState, side: DraftSide, hero: HeroDef) => {
+  const enemy: DraftSide = side === "blue" ? "red" : "blue"
+  const fit = draftFit(
+    hero.id,
+    d.picks[side].map((p) => p.heroId),
+    d.picks[enemy].map((p) => p.heroId),
+  )
+  return 0.02 * Math.max(-10, Math.min(10, fit.total))
+}
+
+/** Value of denying a hero from the *enemy* of `side` (enemy comfort only). */
 const banValue = (d: DraftState, side: DraftSide, hero: HeroDef) => {
   const enemy: DraftSide = side === "blue" ? "red" : "blue"
   return pickValue(d, enemy, hero)
@@ -147,7 +159,10 @@ export const aiChoose = (d: DraftState): string => {
   const value =
     action.kind === "ban"
       ? (h: HeroDef) => banValue(d, action.side, h)
-      : (h: HeroDef) => pickValue(d, action.side, h)
+      : (h: HeroDef) => {
+          const v = pickValue(d, action.side, h)
+          return v < 0 ? v : v + fitValue(d, action.side, h)
+        }
   let best = pool[0]!
   let bestV = -Infinity
   for (const h of pool) {

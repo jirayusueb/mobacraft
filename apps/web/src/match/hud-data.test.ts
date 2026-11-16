@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test"
 import type { FeedEntry, HeroLine, MatchSnapshot } from "@mobacraft/sim"
-import { AnnouncerTracker, GoldHistory, SAMPLE_EVERY } from "./hud-data.ts"
+import type { CommsEntry } from "@mobacraft/sim"
+import {
+  AnnouncerTracker,
+  commsText,
+  leadMarkers,
+  leadSeries,
+  noCallerAlive,
+  phaseBands,
+  signedK,
+} from "./hud-data.ts"
 
 const hero = (over: Partial<HeroLine>): HeroLine =>
   ({
@@ -78,25 +87,105 @@ describe("AnnouncerTracker", () => {
   })
 })
 
-const at = (time: number, blue = time, red = 0) => snap({ time, gold: { blue, red } })
-
-describe("GoldHistory", () => {
-  test("throttles samples to SAMPLE_EVERY", () => {
-    const h = new GoldHistory()
-    h.sample(at(0))
-    h.sample(at(SAMPLE_EVERY / 2))
-    h.sample(at(SAMPLE_EVERY))
-    expect(h.samples.map((s) => s.t)).toEqual([0, SAMPLE_EVERY])
+describe("phase banner", () => {
+  test("a phase feed entry becomes a neutral phase banner", () => {
+    const tr = new AnnouncerTracker()
+    const f: FeedEntry = {
+      t: 420,
+      kind: "phase",
+      side: "neutral",
+      text: "Mid game — the laning phase is over",
+    }
+    const [b] = tr.announce(snap({ feed: [f] }), full, name)
+    expect(b!.kind).toBe("phase")
+    expect(b!.side).toBe("neutral")
+    expect(b!.title).toBe("Mid Game")
+    expect(b!.detail).toBe("the laning phase is over")
   })
+})
 
-  test("finish always records the final moment once and returns a copy", () => {
-    const h = new GoldHistory()
-    h.sample(at(10))
-    const done = h.finish(at(10.3, 99))
-    expect(done.gold.map((s) => s.t)).toEqual([10, 10.3])
-    expect(done.gold.at(-1)!.blue).toBe(99)
-    expect(h.finish(at(10.3)).gold).toHaveLength(2)
-    h.sample(at(50))
-    expect(done.gold).toHaveLength(2)
+const hist = (t: number, nb: number, nr: number) => ({
+  t,
+  nw: { blue: nb, red: nr },
+  xp: { blue: nb / 2, red: nr / 2 },
+  control: { blue: 0, red: 0 },
+})
+
+const entry = (over: Partial<CommsEntry>): CommsEntry => ({
+  t: 0,
+  side: "blue",
+  from: "coach",
+  caller: "Ana",
+  text: "Group up!",
+  followers: 4,
+  total: 5,
+  ...over,
+})
+
+describe("leadSeries", () => {
+  test("maps sim history to your-side leads and appends the live moment", () => {
+    const s = snap({
+      time: 12,
+      history: [hist(0, 0, 0), hist(5, 600, 400), hist(10, 900, 1000)],
+      netWorth: { blue: 1000, red: 1500 },
+      heroes: [
+        { ...ana, xp: 300 },
+        { ...bo, xp: 100 },
+      ],
+    })
+    const blue = leadSeries(s, "blue")
+    expect(blue.map((p) => p.t)).toEqual([0, 5, 10, 12])
+    expect(blue[1]!.nw).toBe(200)
+    expect(blue.at(-1)).toEqual({ t: 12, nw: -500, xp: 200 })
+    expect(leadSeries(s, "red")[1]!.nw).toBe(-200)
+  })
+  test("does not duplicate a sample at the same moment", () => {
+    const s = snap({ time: 5, history: [hist(5, 1, 0)], netWorth: { blue: 1, red: 0 } })
+    expect(leadSeries(s, "blue")).toHaveLength(1)
+  })
+})
+
+describe("phaseBands", () => {
+  test("spans each started phase up to the next one or the end", () => {
+    expect(phaseBands({ laning: 0, mid: 420 }, 600)).toEqual([
+      { phase: "laning", from: 0, to: 420 },
+      { phase: "mid", from: 420, to: 600 },
+    ])
+    expect(phaseBands({}, 30)).toEqual([{ phase: "laning", from: 0, to: 30 }])
+  })
+})
+
+describe("leadMarkers", () => {
+  test("keeps kills, objectives and phase changes with the right owner", () => {
+    const feed: FeedEntry[] = [
+      kill(10),
+      { t: 20, kind: "call", side: "blue", text: "x" },
+      { t: 420, kind: "phase", side: "neutral", text: "Mid game" },
+    ]
+    const m = leadMarkers(feed, [ana, bo], "red")
+    expect(m.map((x) => [x.kind, x.mine])).toEqual([
+      ["kill", false],
+      ["phase", null],
+    ])
+    expect(m[0]!.label).toBe("Ana slew Bo")
+  })
+})
+
+describe("comms", () => {
+  test("formats coach relays through the IGL", () => {
+    expect(commsText(entry({}), [{ ...ana, igl: true }])).toBe(
+      'Coach → Ana (IGL): "Group up!" · 4/5 following',
+    )
+    expect(commsText(entry({}), [{ ...ana, igl: false }])).toContain("Ana (backup)")
+  })
+  test("no caller alive", () => {
+    expect(commsText(entry({ caller: null }), [])).toBe('Coach: "Group up!" · no caller alive')
+    expect(noCallerAlive([{ ...ana, alive: false }, bo], "blue")).toBe(true)
+    expect(noCallerAlive([ana, bo], "blue")).toBe(false)
+  })
+  test("signedK", () => {
+    expect(signedK(1500)).toBe("+1.5k")
+    expect(signedK(-400)).toBe("−0.4k")
+    expect(signedK(10)).toBe("0")
   })
 })

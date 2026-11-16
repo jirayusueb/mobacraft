@@ -4,7 +4,7 @@ import { Coins, Crown, HeartPulse, Map as MapIcon, RotateCcw, Star, Swords } fro
 import type { FlowEvent } from "./flow.ts"
 import type { MatchHistory } from "./hud-data.ts"
 import { ItemSlot } from "./item-icon.tsx"
-import { DamageBars, GoldGraph } from "./results-charts.tsx"
+import { DamageBars, EconomyGraphs, GoldBreakdown, ItemTimeline } from "./results-charts.tsx"
 import { HeroGem, ROLE_LABEL, TeamCrest, clockText } from "./ui.tsx"
 
 /** MVP: kills+assists weighted by damage and healing, deaths penalised. */
@@ -75,12 +75,12 @@ export const ResultsScreen = ({
   draft,
   you,
   final,
-  history,
   dispatch,
 }: {
   draft: DraftState
   you: DraftSide
   final: MatchSnapshot
+  /** Legacy UI-sampled history — unused; the graphs read `final.history` from the sim. */
   history?: MatchHistory
   dispatch: (e: FlowEvent) => void
 }) => {
@@ -104,13 +104,7 @@ export const ResultsScreen = ({
         </div>
 
         <div className="mt-4 grid grid-cols-[1fr_250px] gap-3 max-lg:grid-cols-1">
-          <GoldGraph
-            samples={history?.gold ?? []}
-            feed={final.feed}
-            heroes={final.heroes}
-            you={you}
-            duration={final.time}
-          />
+          <EconomyGraphs final={final} you={you} />
           <MvpCard mvp={mvp} winnerSide={final.winner} />
         </div>
 
@@ -138,7 +132,7 @@ export const ResultsScreen = ({
                           <th className="px-2 py-1.5 text-right font-medium">Lvl</th>
                           <th className="px-2 py-1.5 text-right font-medium">K / D / A</th>
                           <th className="px-2 py-1.5 text-right font-medium">LH</th>
-                          <th className="px-2 py-1.5 text-right font-medium">Gold</th>
+                          <th className="px-2 py-1.5 text-right font-medium">NW</th>
                           <th className="px-2 py-1.5 font-medium max-xl:hidden">Items</th>
                           <th className="px-3 py-1.5 text-right font-medium">Healing</th>
                         </tr>
@@ -161,7 +155,7 @@ export const ResultsScreen = ({
                             </td>
                             <td className="px-2 text-right tabular-nums">{h.lastHits}</td>
                             <td className="px-2 text-right tabular-nums">
-                              {(h.gold / 1000).toFixed(1)}k
+                              {((h.netWorth ?? h.gold) / 1000).toFixed(1)}k
                             </td>
                             <td className="px-2 max-xl:hidden">
                               <span className="flex gap-0.5">
@@ -184,6 +178,11 @@ export const ResultsScreen = ({
             })}
           </div>
           <DamageBars heroes={final.heroes} you={you} mvpId={mvp.id} />
+        </div>
+
+        <div className="mt-3 grid grid-cols-[minmax(0,1fr)_300px] gap-3 max-lg:grid-cols-1">
+          <ItemTimeline final={final} you={you} />
+          <GoldBreakdown final={final} draft={draft} you={you} />
         </div>
 
         <div className="mt-4 flex justify-end gap-2">

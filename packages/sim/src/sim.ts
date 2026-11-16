@@ -31,6 +31,8 @@ export interface Creature {
   readonly heading: number
   readonly state: "marching" | "clashing" | "idle"
   readonly lane?: LaneId
+  /** Swings thrown so far while clashing (renderer attack animation). */
+  readonly attacks?: number
   /** Camp or landmark id for neutrals / Roshan. */
   readonly home?: string
 }
@@ -60,6 +62,7 @@ interface Walker {
   wave: number
   clash: number
   clashed: boolean
+  swings: number
 }
 
 const ROSTER: readonly LaneRole[] = ["melee", "melee", "melee", "ranged"]
@@ -175,6 +178,7 @@ export const createCreepSim = (map: MobaMap, options: SimOptions = {}) => {
             wave,
             clash: 0,
             clashed: false,
+            swings: 0,
           })
         })
       }
@@ -203,7 +207,11 @@ export const createCreepSim = (map: MobaMap, options: SimOptions = {}) => {
     // Clash detection: the front of each wave vs the nearest enemy front in the same lane.
     for (const w of walkers) {
       if (w.clash > 0) {
+        // Trade blows while the waves are locked together (staggered per rank).
+        const before = Math.floor((clashSeconds - w.clash + w.rank * 0.37) / 1.1)
         w.clash -= dt
+        const after = Math.floor((clashSeconds - w.clash + w.rank * 0.37) / 1.1)
+        if (after > before) w.swings++
         continue
       }
       w.s += speed * dt
@@ -243,6 +251,7 @@ export const createCreepSim = (map: MobaMap, options: SimOptions = {}) => {
         heading: p.heading,
         state: w.clash > 0 ? "clashing" : "marching",
         lane: w.lane,
+        attacks: w.swings,
       }
     })
     return [...moving, ...statics]
@@ -271,6 +280,7 @@ export const creepPopulation = (map: MobaMap, options: SimOptions = {}): Populat
         x: c.x,
         z: c.z,
         heading: c.heading,
+        ...(c.attacks ? { attacks: c.attacks } : {}),
       })),
     fx: () => [],
   }

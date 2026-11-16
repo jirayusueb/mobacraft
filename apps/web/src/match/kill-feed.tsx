@@ -2,10 +2,13 @@
 import type { DraftSide, FeedEntry, HeroLine } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
 import {
+  ArrowLeftRight,
   ChevronRight,
   Crown,
   Castle,
   Droplet,
+  EyeOff,
+  Hourglass,
   type LucideIcon,
   Megaphone,
   ShieldPlus,
@@ -22,6 +25,9 @@ const KIND_ICON: Partial<Record<FeedEntry["kind"], LucideIcon>> = {
   aegis: ShieldPlus,
   call: Megaphone,
   ancient: Crown,
+  phase: Hourglass,
+  ward: EyeOff,
+  swap: ArrowLeftRight,
 }
 
 const Who = ({ h }: { h: HeroLine }) => (
@@ -52,7 +58,9 @@ const FeedRow = ({
         tone === "ally" && "border-l-radiant",
         tone === "enemy" && "border-l-dire",
         tone === "neutral" && "border-l-violet-400",
-        f.kind === "call" && "bg-neutral-950/40 text-white/60",
+        (f.kind === "call" || f.kind === "swap" || f.kind === "ward") &&
+          "bg-neutral-950/40 text-white/60",
+        f.kind === "phase" && "font-semibold tracking-wide text-white/90",
         f.kind === "ancient" && "py-1.5 text-[13px] font-semibold",
       )}
     >
