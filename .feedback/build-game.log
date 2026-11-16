@@ -1,0 +1,1 @@
+- check-gate.sh: multi-line bullets ending in ':' false-positive as unfilled fields
