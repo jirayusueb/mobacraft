@@ -135,7 +135,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
       zoom: pose.zoom,
       viewExtent: {
         halfWidth: pose.halfHeight * aspect,
-        halfHeight: pose.halfHeight / Math.sin((36 * Math.PI) / 180),
+        halfHeight: pose.halfHeight / Math.max(0.3, pose.back.y),
       },
       timeOfDay: local.timeOfDay,
       phase: local.phase,
@@ -197,6 +197,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
       local.selected = hit
       world.highlight(hit?.id ?? null)
     }
+    if (drag && drag.moved > 4) rig.release()
     drag = null
     canvas.style.cursor = "grab"
   })

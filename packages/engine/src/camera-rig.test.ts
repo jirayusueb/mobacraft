@@ -50,6 +50,37 @@ describe("camera rig", () => {
     expect(a.pose().target.x - 64).toBeCloseTo(-(b.pose().target.x - 64), 3)
   })
 
+  test("a released drag glides on, then stops", () => {
+    const rig = createRig({ size: 128 })
+    for (let i = 0; i < 5; i++) {
+      rig.panPixels(-20, 0, 800)
+      rig.update(1 / 60)
+    }
+    const atRelease = rig.pose().target.x
+    rig.release()
+    settle(rig)
+    const after = rig.pose().target
+    expect(Math.abs(after.x - atRelease)).toBeGreaterThan(0.5)
+    rig.update(1)
+    expect(rig.pose().target.x).toBeCloseTo(after.x, 2)
+    expect(rig.pose().target.z).toBeCloseTo(after.z, 2)
+  })
+
+  test("pitch flattens as you zoom in", () => {
+    const rig = createRig({ size: 128 })
+    const far = rig.pose().back.y
+    rig.zoomBy(10)
+    settle(rig)
+    expect(rig.pose().back.y).toBeLessThan(far)
+  })
+
+  test("home also resets rotation to the default quarter", () => {
+    const rig = createRig({ size: 128 })
+    rig.rotate(1)
+    rig.home()
+    expect(rig.turn()).toBe(0)
+  })
+
   test("camera always sits above the ground", () => {
     expect(createRig({ size: 128 }).pose().back.y).toBeGreaterThan(0.3)
   })

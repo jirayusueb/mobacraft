@@ -76,6 +76,24 @@ describe("generateMap", () => {
     expect(map.isWalkable(-1, -1)).toBe(false)
   })
 
+  test("lanes ramp smoothly — no cliff steps along any lane", () => {
+    for (const lane of map.lanes) {
+      for (let i = 0; i < lane.path.length - 1; i++) {
+        const a = lane.path[i]!
+        const b = lane.path[i + 1]!
+        const steps = Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) * 2)
+        let prev = map.height[Math.floor(a.z) * N + Math.floor(a.x)]!
+        for (let k = 1; k <= steps; k++) {
+          const x = a.x + ((b.x - a.x) * k) / steps
+          const z = a.z + ((b.z - a.z) * k) / steps
+          const h = map.height[Math.floor(z) * N + Math.floor(x)]!
+          expect(Math.abs(h - prev)).toBeLessThanOrEqual(0.25)
+          prev = h
+        }
+      }
+    }
+  })
+
   test("every camp is reachable open ground", () => {
     for (const c of map.camps) expect(map.isWalkable(c.position.x, c.position.z)).toBe(true)
   })

@@ -35,10 +35,36 @@ export const CANOPY: Record<Team, readonly number[]> = {
 export const TRUNK = 0x5a3e2b
 
 export const TEAM = {
-  radiant: { accent: 0x5fe07a, stone: 0xe6dcc3, roof: 0x3f9a5a },
-  dire: { accent: 0xff5a3c, stone: 0x6b5a5e, roof: 0x9a2f2a },
-  neutral: { accent: 0xb07cff, stone: 0xa89c86, roof: 0x6a4aa0 },
+  radiant: {
+    accent: 0x5fe07a,
+    stone: 0xe6dcc3,
+    stoneDark: 0xc8bb9c,
+    roof: 0x3f9a5a,
+    roofDark: 0x2f7a46,
+    wood: 0x8a6a48,
+    cloth: 0xe8f6e4,
+  },
+  dire: {
+    accent: 0xff5a3c,
+    stone: 0x6b5a5e,
+    stoneDark: 0x52464a,
+    roof: 0x9a2f2a,
+    roofDark: 0x6e2220,
+    wood: 0x4a3530,
+    cloth: 0x2a1c1c,
+  },
+  neutral: {
+    accent: 0xb07cff,
+    stone: 0xa89c86,
+    stoneDark: 0x8a8070,
+    roof: 0x6a4aa0,
+    roofDark: 0x4e3678,
+    wood: 0x7a5a3c,
+    cloth: 0xe6dcf6,
+  },
 } as const
+
+export const WINDOW = 0xffd27a
 
 export const PROP = {
   flower: [0xf2a7c3, 0xfbe9f0, 0xf5d06a, 0xb9a2f0],

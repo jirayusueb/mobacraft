@@ -5,15 +5,13 @@ import {
   type ToolbarProps,
 } from "react-aria-components"
 import { cn, composeTw } from "../lib/cn.ts"
+import { glass } from "./panel.tsx"
 
 /** Glass pill grouping several ghost buttons; arrow keys move between them (react-aria). */
 export const Toolbar = ({ className, ...props }: ToolbarProps) => (
   <AriaToolbar
     {...props}
-    className={composeTw(
-      className,
-      "flex items-center gap-0.5 rounded-full border border-white/12 bg-black/45 p-1 shadow-lg shadow-black/30 backdrop-blur-md",
-    )}
+    className={composeTw(className, `flex h-12 items-center gap-0.5 rounded-full p-1 ${glass}`)}
   />
 )
 
@@ -21,6 +19,6 @@ export const Separator = ({ className, ...props }: SeparatorProps) => (
   <AriaSeparator
     orientation="vertical"
     {...props}
-    className={cn("mx-1 h-6 w-px bg-white/15", className)}
+    className={cn("mx-1.5 h-5 w-px shrink-0 bg-white/15", className)}
   />
 )

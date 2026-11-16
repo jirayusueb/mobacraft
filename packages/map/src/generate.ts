@@ -29,6 +29,8 @@ const CAMP_CLEAR = 0.032
 const GROUND = 1
 const HIGH_GROUND = 1.75
 const RIVER_BED = 0.25
+/** Sandy bank one step below the meadow. */
+const SHORE_LEVEL = 0.75
 const WATER_LEVEL = 0.6
 
 const LANE_IDS: readonly LaneId[] = ["top", "mid", "bot"]
@@ -199,11 +201,23 @@ export const generateMap = (spec: MapSpec = DEFAULT_SPEC): MobaMap => {
       side[i] = p.x + (1 - p.z) > 1 ? 1 : 0
       tint[i] = noise(p.x * 9, p.z * 9, 3)
 
-      // Height: plateau bases, river carved below ground.
-      let h =
-        GROUND +
-        (HIGH_GROUND - GROUND) * smoothstep(Layout.BASE_RADIUS, Layout.BASE_RADIUS - 0.035, dBase)
-      h = RIVER_BED + (h - RIVER_BED) * smoothstep(RIVER_W * 0.7, RIVER_W + SHORE_W, dRiver)
+      // Height: clean single-step cliffs (Quack-style) — plateau bases and a
+      // carved river bank. Only lanes get smooth ramps, like Dota's high-ground
+      // ramps and shallow river crossings.
+      const onLane = dLane < LANE_CLEAR * 0.8
+      const plateauT = onLane
+        ? smoothstep(Layout.BASE_RADIUS + 0.02, Layout.BASE_RADIUS - 0.045, dBase)
+        : dBase < Layout.BASE_RADIUS
+          ? 1
+          : 0
+      let h = GROUND + (HIGH_GROUND - GROUND) * plateauT
+      if (onLane)
+        h =
+          RIVER_BED +
+          0.25 +
+          (h - RIVER_BED - 0.25) * smoothstep(RIVER_W * 0.4, RIVER_W + SHORE_W * 2.2, dRiver)
+      else if (dRiver < RIVER_W) h = RIVER_BED
+      else if (dRiver < RIVER_W + SHORE_W) h = Math.min(h, SHORE_LEVEL)
       height[i] = quantise(h)
 
       let t: Terrain

@@ -1,11 +1,12 @@
 import type { ReactElement, ReactNode } from "react"
 import { Tooltip as AriaTooltip, TooltipTrigger, type TooltipProps } from "react-aria-components"
 import { cn } from "../lib/cn.ts"
+import { Kbd } from "./kbd.tsx"
 
 interface Props extends Omit<TooltipProps, "children"> {
   readonly label: ReactNode
-  /** Keyboard hint shown after the label, e.g. "Q". */
-  readonly shortcut?: string
+  /** Keyboard hint(s) shown after the label, e.g. "Q" or ["Shift", "?"]. */
+  readonly shortcut?: string | readonly string[]
   readonly children: ReactElement
 }
 
@@ -17,26 +18,34 @@ export const Tooltip = ({
   className,
   placement = "top",
   ...props
-}: Props) => (
-  <TooltipTrigger delay={350} closeDelay={0}>
-    {children}
-    <AriaTooltip
-      {...props}
-      placement={placement}
-      offset={10}
-      className={cn(
-        "flex items-center gap-2 rounded-lg border border-white/10 bg-black/80 px-2.5 py-1.5 text-xs text-white shadow-xl backdrop-blur",
-        "data-[entering]:animate-in data-[entering]:fade-in data-[entering]:zoom-in-95",
-        "data-[exiting]:animate-out data-[exiting]:fade-out",
-        typeof className === "string" ? className : undefined,
-      )}
-    >
-      {label}
-      {shortcut ? (
-        <kbd className="rounded bg-white/15 px-1.5 font-mono text-[10px] text-white/80">
-          {shortcut}
-        </kbd>
-      ) : null}
-    </AriaTooltip>
-  </TooltipTrigger>
-)
+}: Props) => {
+  const keys = shortcut === undefined ? [] : typeof shortcut === "string" ? [shortcut] : shortcut
+  return (
+    <TooltipTrigger delay={400} closeDelay={80}>
+      {children}
+      <AriaTooltip
+        {...props}
+        placement={placement}
+        offset={10}
+        className={cn(
+          "flex items-center gap-2 rounded-xl border border-white/10 bg-neutral-950/90 py-1.5 pr-1.5 pl-2.5 text-xs font-medium text-white shadow-xl shadow-black/40 backdrop-blur-xl",
+          keys.length === 0 && "pr-2.5",
+          "data-[entering]:animate-in data-[entering]:fade-in data-[entering]:zoom-in-95 data-[entering]:duration-150",
+          "data-[placement=top]:data-[entering]:slide-in-from-bottom-1 data-[placement=bottom]:data-[entering]:slide-in-from-top-1",
+          "data-[exiting]:animate-out data-[exiting]:fade-out data-[exiting]:duration-75",
+          "motion-reduce:animate-none",
+          typeof className === "string" ? className : undefined,
+        )}
+      >
+        {label}
+        {keys.length > 0 ? (
+          <span className="flex gap-0.5">
+            {keys.map((k) => (
+              <Kbd key={k}>{k}</Kbd>
+            ))}
+          </span>
+        ) : null}
+      </AriaTooltip>
+    </TooltipTrigger>
+  )
+}

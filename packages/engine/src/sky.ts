@@ -10,6 +10,8 @@ export interface Sky {
   readonly groundColor: number
   readonly ambient: number
   readonly label: "Night" | "Dawn" | "Daytime" | "Dusk"
+  /** 0 in daylight → 1 at full night; drives glows, fireflies, bloom. */
+  readonly night: number
 }
 
 const lerp = (a: number, b: number, k: number) => a + (b - a) * k
@@ -21,7 +23,7 @@ const lerpColor = (a: number, b: number, k: number) => {
 
 const NOON = { sun: 0xfff1d6, sky: 0xcfe6ff, ground: 0x6b5a3a }
 const GOLDEN = { sun: 0xffb36b, sky: 0xf2b88a, ground: 0x4a3a30 }
-const NIGHT = { sun: 0x8fa6ff, sky: 0x2a3560, ground: 0x15151f }
+const NIGHT = { sun: 0x9fb4ff, sky: 0x34437a, ground: 0x16182a }
 
 export const skyAt = (t: number): Sky => {
   const tt = ((t % 1) + 1) % 1
@@ -55,5 +57,6 @@ export const skyAt = (t: number): Sky => {
     groundColor,
     ambient: elevation > 0 ? lerp(0.9, 1.4, day) : 0.6,
     label,
+    night: Math.min(1, Math.max(0, -elevation * 3 + 0.25)),
   }
 }
