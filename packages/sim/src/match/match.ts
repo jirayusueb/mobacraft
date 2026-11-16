@@ -39,21 +39,33 @@ import {
 } from "./tactics.ts"
 import { type Player, masteryOf } from "./teams.ts"
 import {
-  VISION_RADIUS,
   WARD_BOUNTY,
   WARD_LIFETIME,
   WARD_MAX,
   WARD_RECHARGE,
   WARD_START,
   type WardSpot,
-  clearGrid,
   createVisionGrid,
-  isVisible,
-  mapControl,
-  reveal,
   wardSpots,
   zoneFor,
 } from "./vision.ts"
+import {
+  ATTACK_REVEAL_RADIUS,
+  ATTACK_REVEAL_TICKS,
+  Bits,
+  TREE_REGROW_TICKS,
+  type TreeEvent,
+  createStaticFog,
+  createTeamFog,
+  destroyTree,
+  fogSnapshot,
+  isVisibleToTeam,
+  recomputeFog,
+  regrowTrees,
+  sourceRadius,
+  type VisionSource,
+} from "./fog.ts"
+import { TeamKnowledge } from "./knowledge.ts"
 
 export type CoachCall = "group" | "roshan" | "push" | "safe" | "farm"
 export const CALL_COOLDOWN = 60
@@ -340,6 +352,8 @@ export interface MatchSnapshot {
   >
   /** Team synergy score 0..15 from the draft. */
   readonly synergy: Readonly<Record<DraftSide, number>>
+  /** Fog of war per side (spec/08 §5): 0 unexplored, 1 explored, 2 visible. */
+  readonly fog: Readonly<Record<DraftSide, { readonly cols: number; readonly bytes: Uint8Array }>>
 }
 
 export interface MatchOptions {
@@ -532,8 +546,21 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   let iglThink = IGL_THINK
   /** Carry item count when the spike call last fired (fires once at 2 items). */
   const spikeFired = { blue: false, red: false }
-  // Vision
-  const visionGrid = { blue: createVisionGrid(map), red: createVisionGrid(map) }
+  // Vision (spec/08): fog-of-war grids keyed by DraftSide; TeamKnowledge is
+  // the only sanctioned AI view of the enemy.
+  const staticFog = createStaticFog(map)
+  const visionGrid = {
+    blue: createTeamFog(staticFog.cols),
+    red: createTeamFog(staticFog.cols),
+  }
+  const walkable = createVisionGrid(map)
+  const knowledge = {
+    blue: new TeamKnowledge(SIDE_TEAM.blue, visionGrid.blue, staticFog),
+    red: new TeamKnowledge(SIDE_TEAM.red, visionGrid.red, staticFog),
+  }
+  /** Enemy attack-reveal bubbles per side (granted by the other side's attacks). */
+  let reveals: { side: DraftSide; x: number; z: number; until: number }[] = []
+  const cutTrees: TreeEvent[] = []
   const control = { blue: 0, red: 0 }
   let visionTimer = 0
   const spots: readonly WardSpot[] = wardSpots(map)
@@ -1345,13 +1372,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         (phase === "laning" && tac[h.side].plans.laning === "aggressive" ? 15 : 0),
     )
   const behaviorOf = (h: HeroState): Behavior => ptac(h).behavior
-  /** You always see heroes in your team's vision, or anyone within 3 tiles. */
+  /** Targeting: fight what you collide with; knowledge reads go through the fog (spec/08 §3). */
   const seen = (viewer: Body, o: Body) =>
     o.type !== "hero" ||
     dist(viewer, o) <= 3 ||
-    isVisible(visionGrid[sideOf(viewer.team as Team)], o)
+    isVisibleToTeam(visionGrid[sideOf(viewer.team as Team)], staticFog, o)
   const visibleEnemyHeroes = (side: DraftSide) =>
-    heroes.filter((e) => e.alive && e.hero!.side !== side && isVisible(visionGrid[side], e))
+    heroes.filter(
+      (e) => e.alive && e.hero!.side !== side && knowledge[side].visible(e.id) !== undefined,
+    )
 
   const coreOf = (side: DraftSide) =>
     heroes
@@ -1740,6 +1769,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (b.hero) dmg *= rng.range(0.9, 1.1)
     deal(b, t, dmg, "physical")
     b.swings = (b.swings ?? 0) + 1
+    // Attack reveal (spec/08 §4a): firing from fog exposes the attacker to
+    // the victim's team for 2.0 s (non-stacking bubbles are fine — same window).
+    if (b.type === "hero")
+      reveals.push({
+        side: sideOf(b.team as Team),
+        x: b.x,
+        z: b.z,
+        until: clock + ATTACK_REVEAL_TICKS / 10,
+      })
     b.cooldown = b.attackTime / statMul(b, "attackSpeed")
     if (b.range > 2.5) {
       const style =
@@ -1815,27 +1853,75 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   const updateVision = () => {
+    const tick = Math.round(clock * 10)
+    reveals = reveals.filter((r) => r.until > clock)
     for (const side of ["blue", "red"] as const) {
-      const g = visionGrid[side]
       const team = SIDE_TEAM[side]
-      clearGrid(g)
+      const lights: VisionSource[] = []
       for (const b of bodies) {
         if (!b.alive || b.team !== team) continue
-        const r =
+        const kind =
           b.type === "hero"
-            ? VISION_RADIUS.hero
+            ? "hero"
             : b.type === "creep"
-              ? VISION_RADIUS.creep
+              ? "creep"
               : b.type === "tower"
-                ? VISION_RADIUS.tower
+                ? "tower"
                 : b.structure
-                  ? VISION_RADIUS.structure
-                  : 0
-        if (r) reveal(g, b, r)
+                  ? "structure"
+                  : null
+        if (!kind) continue
+        lights.push({
+          x: b.x,
+          z: b.z,
+          radius: sourceRadius(kind, tick),
+        })
       }
-      for (const w of wards) if (w.side === side) reveal(g, w, VISION_RADIUS.ward)
-      control[side] = mapControl(g)
+      for (const w of wards)
+        if (w.side === side) lights.push({ x: w.x, z: w.z, radius: sourceRadius("ward", tick) })
+      const enemyReveals = reveals
+        .filter((r) => r.side !== side)
+        .map((r) => ({ x: r.x, z: r.z, radius: ATTACK_REVEAL_RADIUS }))
+      recomputeFog({
+        staticFog,
+        fog: visionGrid[side],
+        tick,
+        sources: lights,
+        reveals: enemyReveals,
+      })
+      // TeamKnowledge snapshot: the only AI-readable view of the enemy (spec/08 §3).
+      knowledge[side].clearTick()
+      for (const e of heroes) {
+        if (!e.alive || e.hero!.side === side) continue
+        knowledge[side].observe(
+          {
+            id: e.id,
+            pos: { x: e.x, z: e.z },
+            vel: { x: 0, z: 0 },
+            hpFrac: e.hp / Math.max(1, e.maxHp),
+            level: e.hero!.level,
+            items: e.hero!.items,
+            alive: e.alive,
+          },
+          tick,
+        )
+      }
+      // Map control counts raw lit walkable cells (own-light metric, spec/08 §3).
+      let n = 0
+      for (let i = 0; i < visionGrid[side].bits.length; i++)
+        if (visionGrid[side].bits[i]! & Bits.Visible && walkable.walkable[i]) n++
+      control[side] = n / walkable.walkableCount
     }
+  }
+
+  /** Tree destruction (spec/08 §4c): opens vision immediately via dirty recompute. */
+  const cutTree = (x: number, z: number): boolean => {
+    const ok = destroyTree(staticFog, { x, z })
+    if (ok) {
+      cutTrees.push({ x, z, regrowAt: clock * 10 + TREE_REGROW_TICKS })
+      visionTimer = 0 // dirty: recompute on the next tick
+    }
+    return ok
   }
 
   const tickWards = (dt: number) => {
@@ -2023,6 +2109,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (visionTimer <= 0) {
       updateVision()
       visionTimer = 0.5
+    }
+    // Tree regrowth (spec/08 §4c): retry while occupied.
+    if (cutTrees.length > 0) {
+      const before = cutTrees.length
+      regrowTrees(staticFog, cutTrees, clock * 10, (p) =>
+        bodies.some((b) => b.alive && Math.abs(b.x - p.x) < 1 && Math.abs(b.z - p.z) < 1),
+      )
+      if (cutTrees.length < before) visionTimer = 0
     }
     tickWards(dt)
     for (const side of ["blue", "red"] as const) {
@@ -2540,6 +2634,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       red: iglCall.red ? { kind: iglCall.red.kind, remaining: iglCall.red.remaining } : null,
     },
     synergy: { ...synergyScore },
+    fog: {
+      blue: fogSnapshot(visionGrid.blue, staticFog),
+      red: fogSnapshot(visionGrid.red, staticFog),
+    },
   })
 
   const advance = (realDt: number) => {
@@ -2557,6 +2655,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     advance,
     time: () => clock,
     units,
+    /** Destroy a tree at world (x, z); opens vision (spec/08 §4c). */
+    cutTree,
+    /** Read-only AI knowledge per side (spec/08 §3) — tests and debug overlays. */
+    knowledgeOf: (side: DraftSide): TeamKnowledge => knowledge[side],
     fx: () => {
       const out = fxQueue
       fxQueue = []
@@ -2585,7 +2687,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       },
     }),
     /** Hero lane at this moment (tests). */
-    visibleTo: (side: DraftSide, x: number, z: number) => isVisible(visionGrid[side], { x, z }),
+    visibleTo: (side: DraftSide, x: number, z: number) =>
+      isVisibleToTeam(visionGrid[side], staticFog, { x, z }),
     castCounts: (): ReadonlyMap<string, number> => casts,
     /** Run to completion headlessly (tests, balance reports). */
     runToEnd: (limitSeconds = maxTime + 1) => {

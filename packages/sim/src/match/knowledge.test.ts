@@ -78,3 +78,40 @@ describe("TeamKnowledge isolation (spec/08 test 6)", () => {
     expect(knowledge.visible("e1")).toBeUndefined()
   })
 })
+
+describe("TeamKnowledge in a real match (spec/08 §3)", () => {
+  test("AI only knows enemies standing in its own lit fog; ghosts never lead truth", async () => {
+    const { generateMap } = await import("@mobacraft/map")
+    const { TEAMS, aiChoose, applyDraft, createDraft, createMatch, isComplete } =
+      await import("../index.ts")
+    const map = generateMap()
+    let d = createDraft(TEAMS[0]!, TEAMS[1]!)
+    while (!isComplete(d)) {
+      const r = applyDraft(d, aiChoose(d))
+      if (!r.ok) throw new Error(r.error)
+      d = r.state
+    }
+    const m = createMatch(map, d, { seed: 11 })
+    let checks = 0
+    let hidden = 0
+    for (let t = 30; t <= 600; t += 15) {
+      m.runToEnd(t)
+      for (const side of ["blue", "red"] as const) {
+        const k = m.knowledgeOf(side)
+        for (const u of k.allVisible()) {
+          expect(m.visibleTo(side, u.pos.x, u.pos.z)).toBe(true)
+          checks++
+        }
+        const enemyTeam = side === "blue" ? "dire" : "radiant"
+        for (const u of m.units()) {
+          if (u.team !== enemyTeam || !u.id.startsWith("hero")) continue
+          if (!k.visible(u.id)) hidden++
+          const g = k.ghost(u.id)
+          if (g) expect(g.lastSeenTick).toBeLessThanOrEqual(Math.round(m.time() * 10))
+        }
+      }
+    }
+    expect(checks).toBeGreaterThan(0)
+    expect(hidden).toBeGreaterThan(0) // fog really hides heroes
+  }, 60_000)
+})

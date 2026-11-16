@@ -23,7 +23,7 @@ import type { VisionSource } from "./fog.ts"
 
 const makeStatic = (
   bandAt: (x: number, z: number) => number,
-  treeAt: (x: number, z: number) => boolean = () => false,
+  isTreeAt: (x: number, z: number) => boolean = () => false,
   cols = 32,
 ) => {
   const band = new Uint8Array(cols * cols)
@@ -31,7 +31,7 @@ const makeStatic = (
   for (let z = 0; z < cols; z++)
     for (let x = 0; x < cols; x++) {
       band[z * cols + x] = bandAt(x, z)
-      forest[z * cols + x] = treeAt(x, z) ? 1 : 0
+      forest[z * cols + x] = isTreeAt(x, z) ? 1 : 0
     }
   return { cols, band, forest, cutTrees: new Uint8Array(cols * cols) }
 }
@@ -90,6 +90,9 @@ describe("fog: high ground (test 2)", () => {
   })
 })
 
+const countLit = (fog: { bits: Uint8Array }) =>
+  fog.bits.reduce((n, b) => n + (b & Bits.Visible ? 1 : 0), 0)
+
 describe("fog: night (test 3)", () => {
   test("single-source lit area is 0.36x day (radius 8 vs round(8*0.6)=5)", () => {
     const s = makeStatic(
@@ -99,9 +102,7 @@ describe("fog: night (test 3)", () => {
     )
     const day = cast1(s, { x: 64, z: 64, radius: sourceRadius("hero", 100) })
     const night = cast1(s, { x: 64, z: 64, radius: sourceRadius("hero", 3700) })
-    const count = (fog: { bits: Uint8Array }) =>
-      fog.bits.reduce((n, b) => n + (b & Bits.Visible ? 1 : 0), 0)
-    const ratio = count(night) / count(day)
+    const ratio = countLit(night) / countLit(day)
     // Area ratio ≈ 25/81 = 0.309; radius^2 ratio bounds it loosely.
     expect(ratio).toBeGreaterThan(0.22)
     expect(ratio).toBeLessThan(0.45)
@@ -182,7 +183,7 @@ describe("fog: dirty/full convergence (test 7)", () => {
     recomputeFog({ staticFog: s2, fog: b, tick: 10, sources: srcs })
     expect(Buffer.from(a.bits).equals(Buffer.from(b.bits))).toBe(true) // cut tree identical in both
     const again = createTeamFog(32)
-    recomputeFog({ staticFog: s1, fog: again, tick: 10, sources: [...srcs].reverse() })
+    recomputeFog({ staticFog: s1, fog: again, tick: 10, sources: srcs.toReversed() })
     expect(Buffer.from(again.bits).equals(Buffer.from(a.bits))).toBe(true) // source order free
   })
 })

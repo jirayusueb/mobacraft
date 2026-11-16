@@ -207,10 +207,19 @@ describe("match with tactics", () => {
       if (!igl.alive && igl.respawnIn > 8 && s.calls.blue.cooldown === 0) {
         const anyAlive = s.heroes.some((h) => h.side === "blue" && h.alive)
         expect(m.call("blue", "safe")).toBe(true)
+        const calledAt = m.time()
         m.runToEnd(m.time() + 6)
-        const last = m.snapshot().comms.findLast((c) => c.side === "blue" && c.from === "coach")!
-        if (anyAlive) expect(last.caller).not.toBe(iglName)
-        tested = true
+        // Only look at comms produced by THIS call — unrelated coach entries
+        // (plan changes, relays) must not shadow it.
+        const last = m
+          .snapshot()
+          .comms.filter((c) => c.t >= calledAt)
+          .findLast((c) => c.side === "blue" && c.from === "coach")
+        // A team wipe inside the relay window leaves nobody to relay — try a later moment.
+        if (last && anyAlive) {
+          expect(last.caller).not.toBe(iglName)
+          tested = true
+        }
       }
     }
     expect(tested).toBe(true)
