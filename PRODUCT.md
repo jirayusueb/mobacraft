@@ -37,7 +37,7 @@ A MOBA battlefield rendered as a calm, hand-made diorama — stepped toy terrain
 ## Brand Commitments
 
 - Name: **Mobacraft**. Island title in HUD: "The Ancient Isle".
-- Visual benchmark the user named: Quack (https://playquack.xyz) — cozy isometric diorama with floating glass-pill HUD. Reference shot: `docs/design/quack-reference.jpg`.
+- Visual benchmark the user named: Quack (https://playquack.xyz) — cozy isometric diorama with floating glass-pill HUD. Reference: the hedge-maze shot on https://playquack.xyz (not redistributed here).
 - Team identity: Radiant green / spring, Dire red-orange / autumn.
 
 ## Evidence on Hand

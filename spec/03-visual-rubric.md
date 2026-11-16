@@ -2,7 +2,7 @@
 
 ## Benchmarks
 
-- **Quack** (playquack.xyz, reference shot `docs/design/quack-reference.jpg`) —
+- **Quack** (playquack.xyz — see the site's hedge-maze screenshot; not redistributed here) —
   isometric island slab with a cut-cake soil edge, round cloud-blob trees,
   dense flowers/grass, warm low-saturation greens, dark backdrop, floating
   glass-pill HUD (title + day/season top-left, pills bottom-left/centre/right).

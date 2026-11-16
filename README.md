@@ -1,7 +1,11 @@
 # Mobacraft
 
-A Dota 2–style three-lane MOBA map rendered as a cozy isometric diorama in the
-spirit of [Quack](https://playquack.xyz). Map milestone: explore only.
+[![CI](https://github.com/jirayusueb/mobacraft/actions/workflows/ci.yml/badge.svg)](https://github.com/jirayusueb/mobacraft/actions/workflows/ci.yml)
+
+A Dota 2–style three-lane MOBA rendered as a cozy isometric diorama in the
+spirit of [Quack](https://playquack.xyz): explore the island, or coach a team
+through **Match Day** — draft against an AI coach, then watch a 5v5 auto-battle
+(Teamfight Manager-style) and steer it with coach calls.
 
 ![Day](docs/design/shot-day.png)
 
@@ -34,3 +38,7 @@ docs/            ADRs + design references/screenshots
 
 Drag pan · wheel zoom (to cursor) · Q/E rotate · WASD/arrows move · H home ·
 click a building · minimap click/drag · time-of-day slider / play.
+
+## License
+
+[MIT](LICENSE). Hero, creep and structure art is procedural code in this repo.
