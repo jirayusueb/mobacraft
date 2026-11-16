@@ -22,6 +22,7 @@ import { HelpPopover } from "./help-popover.tsx"
 import { Minimap } from "./minimap.tsx"
 import { clock, PHASE_ICON, TitleBlock } from "./title-block.tsx"
 import { usePresence } from "./use-presence.ts"
+import { DayClock } from "./day-clock.ts"
 
 const ZOOM_STEP = 1.35
 const MIN_ZOOM = 0.35
@@ -58,14 +59,11 @@ export const Hud = ({
   // Day cycle: one full day per 90 s while playing; wrapping past midnight starts a new day.
   useEffect(() => {
     if (cycleFrom === null) return
-    let tod = cycleFrom
-    let last = performance.now()
+    const dayClock = new DayClock(cycleFrom, performance.now())
     let raf = requestAnimationFrame(function tick(now) {
-      const next = tod + (now - last) / 90_000
-      if (next >= 1) setDay((d) => d + 1)
-      tod = next % 1
-      last = now
-      view.setTimeOfDay(tod)
+      const days = dayClock.tick(now)
+      if (days > 0) setDay((d) => d + days)
+      view.setTimeOfDay(dayClock.timeOfDay)
       raf = requestAnimationFrame(tick)
     })
     return () => cancelAnimationFrame(raf)
