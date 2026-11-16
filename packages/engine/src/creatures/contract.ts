@@ -15,7 +15,7 @@
  *
  * Renderers place models with InstancedMesh (one per kind) and only write instance matrices.
  */
-import type { CreatureKind } from "@mobacraft/sim"
+import type { UnitKind } from "@mobacraft/sim"
 import type { BufferGeometry } from "three/webgpu"
 
 export type Gait =
@@ -25,7 +25,7 @@ export type Gait =
   | "idle"
 
 export interface CreatureModel {
-  readonly kind: CreatureKind
+  readonly kind: UnitKind
   readonly geometry: BufferGeometry
   /** Bounding height, world units — for picking proxies, labels, selection rings. */
   readonly height: number

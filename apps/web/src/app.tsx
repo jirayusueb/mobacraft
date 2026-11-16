@@ -1,8 +1,10 @@
 import { DEFAULT_SPEC, generateMap } from "@mobacraft/map"
 import { Button, Panel } from "@mobacraft/ui"
 import { RefreshCw, TriangleAlert } from "lucide-react"
-import { useRef } from "react"
+import { useReducer, useRef } from "react"
 import { Hud } from "./hud/hud.tsx"
+import { next } from "./match/flow.ts"
+import { MatchDay } from "./match/match-day.tsx"
 import { t } from "./strings.ts"
 import { useMapView } from "./use-map-view.ts"
 
@@ -80,6 +82,7 @@ const Failure = ({ message }: { message: string }) => (
 export const App = () => {
   const canvas = useRef<HTMLCanvasElement>(null)
   const status = useMapView(canvas, map)
+  const [screen, dispatch] = useReducer(next, { _tag: "explore" })
 
   return (
     <main className="relative h-full w-full bg-[radial-gradient(ellipse_at_center,#20262a_0%,#15181a_70%)]">
@@ -88,7 +91,17 @@ export const App = () => {
         className={`block size-full transition-opacity duration-700 motion-reduce:transition-none ${status._tag === "ready" ? "opacity-100" : "opacity-0"}`}
         aria-label="Map view"
       />
-      {status._tag === "ready" ? <Hud map={map} view={status.view} state={status.state} /> : null}
+      {status._tag === "ready" && screen._tag === "explore" ? (
+        <Hud
+          map={map}
+          view={status.view}
+          state={status.state}
+          onMatchDay={() => dispatch({ _tag: "start" })}
+        />
+      ) : null}
+      {status._tag === "ready" ? (
+        <MatchDay map={map} view={status.view} screen={screen} dispatch={dispatch} />
+      ) : null}
       {status._tag === "loading" ? <Loader /> : null}
       {status._tag === "failed" ? <Failure message={status.message} /> : null}
     </main>

@@ -3,4 +3,16 @@
  * Pure and deterministic; the engine renders snapshots, a future server can run it headless.
  */
 export * from "./kinds.ts"
-export { type Creature, type CreepSim, type SimOptions, createCreepSim } from "./sim.ts"
+export {
+  type Creature,
+  type CreepSim,
+  type SimOptions,
+  createCreepSim,
+  creepPopulation,
+} from "./sim.ts"
+export * from "./population.ts"
+export * from "./match/heroes.ts"
+export * from "./match/teams.ts"
+export * from "./match/items.ts"
+export * from "./match/draft.ts"
+export * from "./match/match.ts"

@@ -75,3 +75,14 @@ resources — so React's effect cleanup is one `Scope.close`.
   color, glow, limb; feet at y=0, +z forward). Gait animation is TSL-only.
 - Rendering: one InstancedMesh per kind (≤ 23 draw calls); per-frame CPU = instance matrices.
 - No combat/HP yet: waves "clash" (hold for a few seconds) and march on.
+
+## Match Day (milestone 2)
+
+- `@mobacraft/sim/match`: `createDraft/applyDraft/aiChoose` (pure draft state machine + AI coach),
+  `createMatch(map, draft, {seed})` (deterministic 0.1 s tick 5v5; grid A* nav; utility AI per hero
+  biased by coach calls and player `sense`). Implements the `Population` seam.
+- `Population` (sim/population.ts) is the engine's only input for units: `advance(dt) · units() · fx() · structures()`.
+  Explore mode = `creepPopulation(map)`; Match Day = a `Match`. `MapView.setPopulation(p | null)` swaps them.
+- Engine draws heroes from `creatures/kit-hero.ts` through the same instanced creature path; destroyed
+  structures collapse in the baked meshes via a `structureAlive` uniform array (no draw-call cost) plus rubble.
+- Web: `apps/web/src/match/*` — flow reducer (explore → pick-team → draft → match → results) and screens.

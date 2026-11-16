@@ -17,6 +17,8 @@ import {
   OctahedronGeometry,
   RingGeometry,
   Shape,
+  type Node,
+  type Object3D,
   TorusGeometry,
   Vector2,
 } from "three/webgpu"
@@ -29,8 +31,11 @@ import {
   sin,
   smoothstep,
   time,
+  int,
   uniform,
+  uniformArray,
   vec2,
+  vec3,
 } from "three/tsl"
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
 import { TEAM, WINDOW } from "../palette.ts"
@@ -979,7 +984,7 @@ const landmark = (l: Landmark, y: number, river: readonly Vec2[]) => {
  * structures). Picking uses invisible per-entity proxy cylinders: raycasts
  * ignore `visible`, the renderer does not.
  */
-const bake = (source: Group) => {
+const bake = (source: Group, ownerOf: (root: Object3D) => number) => {
   source.updateMatrixWorld(true)
   const buckets = new Map<MeshStandardNodeMaterial, BufferGeometry[]>()
   source.traverse((o) => {
@@ -989,6 +994,13 @@ const bake = (source: Group) => {
     )
     for (const name of Object.keys(g.attributes))
       if (name !== "position" && name !== "normal") g.deleteAttribute(name)
+    // Which destructible structure this vertex belongs to (-1 = never destroyed).
+    let root: Object3D = o
+    while (root.parent && root.parent !== source) root = root.parent
+    g.setAttribute(
+      "owner",
+      new BufferAttribute(new Float32Array(g.attributes.position!.count).fill(ownerOf(root)), 1),
+    )
     const list = buckets.get(o.material as MeshStandardNodeMaterial) ?? []
     list.push(g)
     buckets.set(o.material as MeshStandardNodeMaterial, list)
@@ -998,7 +1010,7 @@ const bake = (source: Group) => {
     const merged = mergeGeometries(geos)
     for (const g of geos) g.dispose()
     if (!merged) continue
-    const mesh = new Mesh(merged, material)
+    const mesh = new Mesh(merged, destructible(material))
     mesh.castShadow = true
     mesh.receiveShadow = true
     out.add(mesh)
@@ -1008,8 +1020,42 @@ const bake = (source: Group) => {
 
 const proxyMaterial = new MeshBasicNodeMaterial()
 
+/** Up to 64 destructible structures; 1 = standing, 0 = destroyed. */
+const MAX_DESTRUCTIBLE = 64
+export const structureAlive = uniformArray(
+  Array.from({ length: MAX_DESTRUCTIBLE }, () => 1),
+  "float",
+)
+
+/**
+ * Clone a shared baked material so vertices whose owner is destroyed collapse to
+ * a point below ground (no draw-call cost, no per-structure meshes).
+ */
+const destructibleCache = new Map<MeshStandardNodeMaterial, MeshStandardNodeMaterial>()
+const destructible = (base: MeshStandardNodeMaterial) => {
+  let m = destructibleCache.get(base)
+  if (m) return m
+  m = base.clone()
+  m.emissiveNode = base.emissiveNode
+  m.colorNode = base.colorNode
+  const owner = attribute<"float">("owner", "float")
+  const alive = owner
+    .lessThan(0)
+    .select(
+      float(1),
+      (structureAlive as unknown as { element: (i: unknown) => Node<"float"> }).element(
+        int(owner.max(0)),
+      ),
+    )
+  m.positionNode = positionLocal.mul(alive).add(vec3(0, alive.oneMinus().mul(-50), 0))
+  destructibleCache.set(base, m)
+  return m
+}
+
 /** All buildings, camps and landmarks: merged visuals + named, pickable proxies. */
-export const buildStructures = (map: MobaMap): { visuals: Group; pickables: Group } => {
+export const buildStructures = (
+  map: MobaMap,
+): { visuals: Group; pickables: Group; destructibleIds: readonly string[] } => {
   const source = new Group()
   const blobs: Blob[] = []
   const ground = (x: number, z: number) => map.heightAt(x, z)
@@ -1049,13 +1095,22 @@ export const buildStructures = (map: MobaMap): { visuals: Group; pickables: Grou
     pickables.add(proxy)
   }
 
-  const visuals = bake(source)
+  // Destructible = towers, barracks, ancients (index into structureAlive by structure order).
+  const destructibleIds = map.structures
+    .filter(
+      (s) =>
+        s.team !== "neutral" &&
+        (s.kind === "tower" || s.kind === "ancient" || s.kind.startsWith("barracks")),
+    )
+    .map((s) => s.id)
+  const ownerIndex = new Map(destructibleIds.map((id, i) => [id, i]))
+  const visuals = bake(source, (root) => ownerIndex.get(root.name) ?? -1)
   visuals.add(buildBlobs(blobs))
   visuals.name = "structures"
   source.traverse((o) => {
     if (o instanceof Mesh) o.geometry.dispose()
   })
-  return { visuals, pickables }
+  return { visuals, pickables, destructibleIds }
 }
 
 /**

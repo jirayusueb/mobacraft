@@ -12,6 +12,7 @@ import {
   RotateCcw,
   RotateCw,
   Skull,
+  Swords,
 } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 import { t } from "../strings.ts"
@@ -38,10 +39,13 @@ export const Hud = ({
   map,
   view,
   state,
+  onMatchDay,
 }: {
   map: MobaMap
   view: MapViewShape
   state: ViewState
+  /** Opens the Match Day flow (team pick → draft → match). */
+  onMatchDay: () => void
 }) => {
   // `null` = paused; otherwise the time of day the cycle started from.
   const [cycleFrom, setCycleFrom] = useState<number | null>(null)
@@ -144,6 +148,15 @@ export const Hud = ({
         ) : null}
       </div>
 
+      {/* top-right under the minimap stack is busy; Match Day lives bottom-left, above the jump pill */}
+      <div className="pointer-events-auto absolute bottom-[84px] left-6 max-md:bottom-[72px] max-md:left-4">
+        <Button
+          className="h-11 gap-2 rounded-full bg-amber-300/90 px-5 text-sm font-semibold text-black shadow-lg shadow-black/40 hover:bg-amber-200"
+          onPress={onMatchDay}
+        >
+          <Swords className="size-4!" aria-hidden /> Match Day
+        </Button>
+      </div>
       {/* bottom-left: jump-to pill, like Quack's Build pill */}
       <Toolbar
         aria-label={t("hud.jump")}

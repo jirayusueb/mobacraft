@@ -16,7 +16,7 @@
 import type { MobaMap } from "@mobacraft/map"
 import { Context, Effect, Layer, Stream, SubscriptionRef } from "effect"
 import { WebGPURenderer } from "three/webgpu"
-import { CREATURE_NAME } from "@mobacraft/sim"
+import { CREATURE_NAME, type Population } from "@mobacraft/sim"
 import { createRig } from "./camera-rig.ts"
 import { RendererInitError } from "./errors.ts"
 import { createWorld, type Picked } from "./world.ts"
@@ -49,6 +49,13 @@ export interface MapViewShape {
   readonly focus: (x: number, z: number) => void
   readonly select: (id: string | null) => void
   readonly setTimeOfDay: (t: number) => void
+  /**
+   * Swap the units on the map. `null` = explore mode (ambient creeps).
+   * The caller owns the Population; MapView only reads it each frame
+   * (advance → units → fx → structures).
+   */
+  readonly setPopulation: (population: Population | null) => void
+  readonly setHealthBars: (on: boolean) => void
 }
 
 const same = (a: Picked | null, b: Picked | null) => a?.id === b?.id
@@ -201,7 +208,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
       const p = ndc(e)
       const hit = world.pick(p.x, p.y)
       local.selected = hit
-      following = hit?.id.startsWith("creature-") ? hit.id : null
+      following = hit && world.unitById(hit.id) ? hit.id : null
       world.highlight(hit?.id ?? null)
     }
     if (drag && drag.moved > 4) rig.release()
@@ -251,7 +258,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     world.tick(dt)
     // Follow a selected creature until the user pans away.
     if (following) {
-      const c = world.creatureById(following)
+      const c = world.unitById(following)
       if (c) rig.focus(c.x, c.z)
       else following = null
     }
@@ -288,11 +295,16 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
     home: () => rig.home(),
     focus: (x, z) => rig.focus(x, z),
     select: (id) => {
-      if (id?.startsWith("creature-")) {
-        const c = world.creatureById(id)
-        local.selected = c ? { id, kind: c.kind, team: c.team, name: CREATURE_NAME[c.kind] } : null
-        following = c ? id : null
-        world.highlight(local.selected?.id ?? null)
+      const unit = id ? world.unitById(id) : undefined
+      if (id && unit) {
+        local.selected = {
+          id,
+          kind: unit.kind,
+          team: unit.team,
+          name: unit.label ?? CREATURE_NAME[unit.kind as keyof typeof CREATURE_NAME] ?? unit.kind,
+        }
+        following = id
+        world.highlight(id)
         return
       }
       following = null
@@ -306,6 +318,13 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
       world.highlight(local.selected?.id ?? null)
       if (s) rig.focus(s.position.x, s.position.z)
     },
+    setPopulation: (p) => {
+      following = null
+      local.selected = null
+      local.hovered = null
+      world.setPopulation(p)
+    },
+    setHealthBars: (on) => world.setHealthBars(on),
     setTimeOfDay: (t) => {
       local.timeOfDay = ((t % 1) + 1) % 1
       local.phase = world.setTimeOfDay(local.timeOfDay)

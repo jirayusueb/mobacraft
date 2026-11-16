@@ -20,12 +20,26 @@ import type { Pose } from "./camera-rig.ts"
 import { color as tslColor, mix, screenUV, smoothstep, uniform } from "three/tsl"
 import { createPost } from "./post.ts"
 import { buildFoliage } from "./scene/foliage.ts"
-import { createCreepSim, CREATURE_NAME, type Creature } from "@mobacraft/sim"
+import {
+  CREATURE_NAME,
+  type CreatureKind,
+  type Population,
+  type StructureStatus,
+  type Unit,
+  creepPopulation,
+} from "@mobacraft/sim"
+import { createFxLayer } from "./creatures/fx.ts"
 import { creatureModel } from "./creatures/kit.ts"
-import { createCreatureLayer } from "./creatures/render.ts"
+import { createUnitLayer } from "./creatures/render.ts"
+import { createRubbleLayer } from "./scene/rubble.ts"
 import { buildAmbient } from "./scene/ambient.ts"
 import { buildLaneProps } from "./scene/lane-props.ts"
-import { buildSelectionRing, buildStructures, nightGlow } from "./scene/structures.ts"
+import {
+  buildSelectionRing,
+  buildStructures,
+  nightGlow,
+  structureAlive,
+} from "./scene/structures.ts"
 import { buildTerrain } from "./scene/terrain.ts"
 import { buildWater } from "./scene/water.ts"
 import { skyAt } from "./sky.ts"
@@ -51,13 +65,18 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
   const terrain = buildTerrain(map)
   const water = buildWater(map)
   const foliage = buildFoliage(map)
-  const { visuals: structures, pickables } = buildStructures(map)
+  const { visuals: structures, pickables, destructibleIds } = buildStructures(map)
   const laneProps = buildLaneProps(map)
   const ambient = buildAmbient(map)
-  // Creatures: the sim owns where they are; the layer only draws snapshots.
-  const sim = createCreepSim(map)
-  const creatures = createCreatureLayer(map)
-  let snapshot: readonly Creature[] = []
+  // Units: a Population owns where they are; the layers only draw snapshots.
+  // Explore mode runs the ambient creep sim; Match Day swaps in a full match.
+  let population: Population = creepPopulation(map)
+  const units = createUnitLayer(map)
+  const fxLayer = createFxLayer((x, z) => map.heightAt(x, z))
+  const rubble = createRubbleLayer(map)
+  let snapshot: readonly Unit[] = []
+  let structureStatus: readonly StructureStatus[] = []
+  let realClock = 0
   const ring = buildSelectionRing()
   scene.add(
     terrain,
@@ -68,7 +87,9 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     pickables,
     ring,
     ambient.group,
-    creatures.group,
+    units.group,
+    fxLayer.group,
+    rubble.group,
   )
   for (const o of [terrain, water, foliage, laneProps, structures, pickables]) {
     o.traverse((c) => {
@@ -168,8 +189,9 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     const hit = raycaster.intersectObject(pickables, true)[0]
     // Creatures: nearest one whose body the ray passes through (sampled at mid-height).
     const { origin, direction } = raycaster.ray
-    let best: { c: Creature; t: number } | null = null
+    let best: { c: Unit; t: number } | null = null
     for (const c of snapshot) {
+      if (c.alive === false) continue
       const model = creatureModel(c.kind)
       const y = map.heightAt(c.x, c.z) + model.height * 0.5
       const t = (y - origin.y) / direction.y
@@ -183,9 +205,16 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     const proxyIsArea = hit && String(hit.object.userData.kind).match(/^camp-|^roshan$|^rune$/)
     if (best && (!hit || proxyIsArea || best.t < hit.distance)) {
       const c = best.c
-      return { id: `creature-${c.id}`, kind: c.kind, team: c.team, name: CREATURE_NAME[c.kind] }
+      return {
+        id: c.id,
+        kind: c.kind,
+        team: c.team,
+        name: c.label ?? CREATURE_NAME[c.kind as CreatureKind] ?? c.kind,
+      }
     }
     const o = hit?.object
+    // Destroyed structures aren't pickable.
+    if (o && structureStatus.some((st) => st.id === o.userData.id && !st.alive)) return null
     return o
       ? {
           id: o.userData.id as string,
@@ -194,11 +223,9 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
         }
       : null
   }
-  /** Current position of a picked creature (they move), for the ring and camera follow. */
-  const creatureById = (id: string) => {
-    const n = Number(id.slice("creature-".length))
-    return snapshot.find((c) => c.id === n)
-  }
+  /** Current state of a picked unit (they move), for the ring and camera follow. */
+  const unitById = (id: string) => snapshot.find((c) => c.id === id && c.alive !== false)
+  const isUnitId = (id: string) => !pickables.getObjectByName(id)
   /** Ground point under the cursor (for zoom-to-cursor and focus). */
   const groundAt = (ndcX: number, ndcY: number) => {
     ndc.set(ndcX, ndcY)
@@ -208,10 +235,11 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
   }
 
   let highlighted: string | null = null
+  let showBars = true
   const highlight = (id: string | null) => {
     highlighted = id
-    if (id?.startsWith("creature-")) {
-      const c = creatureById(id)
+    if (id && isUnitId(id)) {
+      const c = unitById(id)
       ring.visible = c !== undefined
       if (!c) return
       const r = creatureModel(c.kind).radius + 0.3
@@ -234,14 +262,42 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     pick,
     groundAt,
     highlight,
-    /** Advance creature sim; the ring follows a selected creature. */
+    /** Advance the population; draw units, bars, fx, rubble; the ring follows a selected unit. */
     tick: (dt: number) => {
-      sim.step(dt)
-      snapshot = sim.creatures()
-      creatures.update(snapshot)
-      if (highlighted?.startsWith("creature-")) highlight(highlighted)
+      realClock += dt
+      population.advance(dt)
+      snapshot = population.units()
+      units.update(snapshot, camera.quaternion, showBars)
+      fxLayer.push(population.fx(), realClock)
+      fxLayer.update(realClock)
+      const next = population.structures?.() ?? []
+      // Collapse destroyed buildings in the baked meshes (uniform array, no rebuild).
+      const values = structureAlive.array as number[]
+      let changed = false
+      for (let i = 0; i < values.length; i++) {
+        const id = destructibleIds[i]
+        const alive = id === undefined || (next.find((st) => st.id === id)?.alive ?? true) ? 1 : 0
+        if (values[i] !== alive) {
+          values[i] = alive
+          changed = true
+        }
+      }
+      if (changed) structureAlive.needsUpdate = true
+      structureStatus = next
+      rubble.update(structureStatus, camera.quaternion)
+      if (highlighted && isUnitId(highlighted)) highlight(highlighted)
     },
-    creatureById,
+    /** Swap what's on the map (explore creeps ↔ a match). `null` restores explore mode. */
+    setPopulation: (p: Population | null) => {
+      population = p ?? creepPopulation(map)
+      snapshot = []
+      structureStatus = []
+      highlight(null)
+    },
+    unitById,
+    setHealthBars: (on: boolean) => {
+      showBars = on
+    },
     render: () => post.render(),
     stats: () => ({
       calls: renderer.info.render.drawCalls,
@@ -249,7 +305,9 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     }),
     dispose: () => {
       post.dispose()
-      creatures.dispose()
+      units.dispose()
+      fxLayer.dispose()
+      rubble.dispose()
       scene.traverse((o) => {
         if (o instanceof Mesh) {
           o.geometry.dispose()

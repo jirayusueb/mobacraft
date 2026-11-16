@@ -2,7 +2,7 @@
  * Creature model kit — the one place that maps a CreatureKind to geometry and material.
  * Geometry comes from kit-lane.ts / kit-neutral.ts (contract.ts describes the attribute layout).
  */
-import type { CreatureKind } from "@mobacraft/sim"
+import type { CreatureKind, UnitKind } from "@mobacraft/sim"
 import { Box3, MeshStandardNodeMaterial, type Node } from "three/webgpu"
 import {
   attribute,
@@ -19,25 +19,28 @@ import {
   vec4,
 } from "three/tsl"
 
+import { nightGlow } from "../scene/structures.ts"
+import type { CreatureModel, Gait } from "./contract.ts"
+import { heroModel } from "./kit-hero.ts"
+import { laneModels } from "./kit-lane.ts"
+import { neutralModels } from "./kit-neutral.ts"
+
 /** The InstancedMesh's per-instance matrix, as three binds it for instanced draws. */
 // Typings model ReferenceAttributeNode as a bare node; at runtime it is a mat4 node.
 const instanceMatrix = referenceAttribute("instanceMatrix", "mat4") as unknown as Node<"mat4">
-import type { CreatureModel, Gait } from "./contract.ts"
-import { laneModels } from "./kit-lane.ts"
-import { neutralModels } from "./kit-neutral.ts"
-import { nightGlow } from "../scene/structures.ts"
 
 const builders: Record<CreatureKind, () => import("three/webgpu").BufferGeometry> = {
   ...laneModels,
   ...neutralModels,
 }
 
-const models = new Map<CreatureKind, CreatureModel>()
+const models = new Map<UnitKind, CreatureModel>()
 
-export const creatureModel = (kind: CreatureKind): CreatureModel => {
+/** Geometry for any unit kind: creatures from the creep/neutral kits, heroes from the hero kit. */
+export const creatureModel = (kind: UnitKind): CreatureModel => {
   let m = models.get(kind)
   if (!m) {
-    const geometry = builders[kind]()
+    const geometry = kind in builders ? builders[kind as CreatureKind]() : heroModel(kind)
     geometry.computeBoundingBox()
     const box = geometry.boundingBox ?? new Box3()
     m = {

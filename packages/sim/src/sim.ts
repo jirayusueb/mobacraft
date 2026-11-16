@@ -1,5 +1,6 @@
 import type { LaneId, MobaMap, Team, Vec2 } from "@mobacraft/map"
 import { type CreatureKind, type LaneRole, NEUTRALS_BY_CAMP } from "./kinds.ts"
+import type { Population } from "./population.ts"
 
 /**
  * Creep simulation — pure, deterministic, no rendering.
@@ -255,3 +256,22 @@ export const createCreepSim = (map: MobaMap, options: SimOptions = {}) => {
 }
 
 export type CreepSim = ReturnType<typeof createCreepSim>
+
+/** Explore-mode population: the ambient creep sim behind the Population seam. */
+export const creepPopulation = (map: MobaMap, options: SimOptions = {}): Population => {
+  const sim = createCreepSim(map, options)
+  return {
+    advance: (dt) => sim.step(dt),
+    time: () => sim.stats().clock,
+    units: () =>
+      sim.creatures().map((c) => ({
+        id: `creature-${c.id}`,
+        kind: c.kind,
+        team: c.team,
+        x: c.x,
+        z: c.z,
+        heading: c.heading,
+      })),
+    fx: () => [],
+  }
+}

@@ -1,4 +1,5 @@
 import type { CampKind, Team } from "@mobacraft/map"
+export type { HeroId } from "./match/heroes.ts"
 
 /** Lane creep roles. Every wave is 3 melee + 1 ranged; every 5th wave adds a siege engine. */
 export type LaneRole = "melee" | "ranged" | "siege"
