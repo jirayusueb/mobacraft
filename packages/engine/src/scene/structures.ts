@@ -39,6 +39,7 @@ import {
 } from "three/tsl"
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
 import { TEAM, WINDOW } from "../palette.ts"
+import { Memo } from "../memo.ts"
 
 /** 0 day → 1 night; windows, campfires and crystals glow brighter at night. */
 export const nightGlow = uniform(0)
@@ -48,25 +49,28 @@ type Palette = (typeof TEAM)[keyof typeof TEAM]
 const ROCK = { light: 0x6b6762, dark: 0x57534f, moss: 0x5f7a3a, floor: 0x2e2a27, earth: 0x4f4a44 }
 const BONE = 0xe6dcc4
 
-const materials = new Map<string, MeshStandardNodeMaterial>()
+interface MatOpts {
+  readonly emissive?: boolean
+  readonly pulse?: boolean
+  readonly glow?: number
+}
+
+const materials = new Memo((key: string) => {
+  const [hex, emissive, pulse, glowScale] = JSON.parse(key) as [number, boolean, boolean, number]
+  const m = new MeshStandardNodeMaterial({ color: hex, roughness: 0.85, flatShading: true })
+  if (emissive) {
+    const glow = pulse ? sin(time.mul(2)).mul(0.35).add(1.15) : float(1)
+    m.emissiveNode = color(hex).mul(glow).mul(glowScale)
+  }
+  return m
+})
+
 /**
  * Shared flat-shaded material per colour (+ emissive variant). Every part goes
  * through here so baking can merge by material. `glow` scales the emissive.
  */
-const mat = (hex: number, opts: { emissive?: boolean; pulse?: boolean; glow?: number } = {}) => {
-  const glowScale = opts.glow ?? 1
-  const key = `${hex}-${opts.emissive ?? false}-${opts.pulse ?? false}-${glowScale}`
-  let m = materials.get(key)
-  if (!m) {
-    m = new MeshStandardNodeMaterial({ color: hex, roughness: 0.85, flatShading: true })
-    if (opts.emissive) {
-      const glow = opts.pulse ? sin(time.mul(2)).mul(0.35).add(1.15) : float(1)
-      m.emissiveNode = color(hex).mul(glow).mul(glowScale)
-    }
-    materials.set(key, m)
-  }
-  return m
-}
+const mat = (hex: number, opts: MatOpts = {}) =>
+  materials.get(JSON.stringify([hex, opts.emissive ?? false, opts.pulse ?? false, opts.glow ?? 1]))
 
 const part = (geo: BufferGeometry, material: MeshStandardNodeMaterial, x = 0, y = 0, z = 0) => {
   const m = new Mesh(geo, material)
@@ -1031,11 +1035,8 @@ export const structureAlive = uniformArray(
  * Clone a shared baked material so vertices whose owner is destroyed collapse to
  * a point below ground (no draw-call cost, no per-structure meshes).
  */
-const destructibleCache = new Map<MeshStandardNodeMaterial, MeshStandardNodeMaterial>()
-const destructible = (base: MeshStandardNodeMaterial) => {
-  let m = destructibleCache.get(base)
-  if (m) return m
-  m = base.clone()
+const destructibles = new Memo((base: MeshStandardNodeMaterial) => {
+  const m = base.clone()
   m.emissiveNode = base.emissiveNode
   m.colorNode = base.colorNode
   const owner = attribute<"float">("owner", "float")
@@ -1048,9 +1049,9 @@ const destructible = (base: MeshStandardNodeMaterial) => {
       ),
     )
   m.positionNode = positionLocal.mul(alive).add(vec3(0, alive.oneMinus().mul(-50), 0))
-  destructibleCache.set(base, m)
   return m
-}
+})
+const destructible = (base: MeshStandardNodeMaterial) => destructibles.get(base)
 
 /** All buildings, camps and landmarks: merged visuals + named, pickable proxies. */
 export const buildStructures = (
