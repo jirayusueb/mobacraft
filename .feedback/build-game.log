@@ -1,1 +1,2 @@
 - check-gate.sh: multi-line bullets ending in ':' false-positive as unfilled fields
+- 2026-11-17 spec/12: check-gate.sh scans all specs, so pre-existing prose colons in older specs FAIL a new spec gate; ran it on a temp copy of the single spec
