@@ -62,23 +62,11 @@ const birdGeometry = () => {
   return g
 }
 
-/**
- * Ambient life, fully GPU-animated from `instanceIndex` + `time` (no per-frame CPU work):
- *  - bird flocks circling high above the map (always on, fewer silhouettes at night via fade)
- *  - fireflies near forests and the river (night only, emissive → picked up by bloom)
- *  - petals/leaves drifting down the river.
- * Nothing casts shadows. Three draw calls by day, four at night.
- */
-export const buildAmbient = (
-  map: MobaMap,
-): { group: Group; setNight: (night01: number) => void } => {
-  const group = new Group()
-  group.name = "ambient"
-  const N = map.size
-  const rnd = new ScatterRng(map.spec.seed + 7)
-  const night = uniform(0)
+const nightUniform = () => uniform(0)
+type Night = ReturnType<typeof nightUniform>
 
-  // --- birds -------------------------------------------------------------------
+/** Bird flocks circling high above the map. */
+const buildBirds = (N: number, night: Night) => {
   const FLOCKS = 4
   const PER_FLOCK = 11
   const birdMat = new MeshBasicNodeMaterial({ side: DoubleSide })
@@ -124,9 +112,12 @@ export const buildAmbient = (
     // Dark-ish silhouettes with a warm underside tint; softened at night.
     birdMat.colorNode = mix(color(0x3a3430), color(0x1c1f2a), night)
   }
-  group.add(ambientMesh(birdGeometry(), birdMat, FLOCKS * PER_FLOCK, "birds"))
+  return ambientMesh(birdGeometry(), birdMat, FLOCKS * PER_FLOCK, "birds")
+}
 
-  // --- fireflies -----------------------------------------------------------------
+/** Fireflies near forests and the river; hidden by day. */
+const buildFireflies = (map: MobaMap, rnd: ScatterRng, night: Night) => {
+  const N = map.size
   const spots: number[] = []
   const near = (tx: number, tz: number, kind: number) => {
     for (let dz = -2; dz <= 2; dz++)
@@ -183,9 +174,14 @@ export const buildAmbient = (
   }
   const fireflies = ambientMesh(new OctahedronGeometry(1, 0), fireflyMat, fireflyCount, "fireflies")
   fireflies.visible = false
-  group.add(fireflies)
+  return fireflies
+}
 
-  // --- river petals ----------------------------------------------------------------
+/**
+ * Petals drifting down the river. Segment, lateral offset and colour all derive from
+ * hash(instanceIndex) and a uniform array of river points — no per-instance attributes.
+ */
+const buildPetals = (map: MobaMap, night: Night) => {
   // Segment, lateral offset and colour all derive from hash(instanceIndex) and a
   // uniform array of river points — no per-instance attributes needed.
   const river = map.river
@@ -236,14 +232,40 @@ export const buildAmbient = (
     )
     petalMat.colorNode = tintC.mul(mix(float(1), float(0.45), night))
   }
-  group.add(ambientMesh(new PlaneGeometry(1, 0.6), petalMat, petalCount, "petals"))
+  return ambientMesh(new PlaneGeometry(1, 0.6), petalMat, petalCount, "petals")
+}
 
-  return {
-    group,
-    setNight: (night01: number) => {
-      const n = Math.min(1, Math.max(0, night01))
-      night.value = n
-      fireflies.visible = n > 0.02
-    },
+/**
+ * Ambient life, fully GPU-animated from `instanceIndex` + `time` (no per-frame CPU work):
+ *  - bird flocks circling high above the map (always on, fewer silhouettes at night via fade)
+ *  - fireflies near forests and the river (night only, emissive → picked up by bloom)
+ *  - petals/leaves drifting down the river.
+ * Nothing casts shadows. Three draw calls by day, four at night.
+ */
+export class AmbientLife {
+  readonly group = new Group()
+  readonly #night: Night = nightUniform()
+  readonly #fireflies: InstancedMesh
+
+  constructor(map: MobaMap) {
+    this.group.name = "ambient"
+    const rnd = new ScatterRng(map.spec.seed + 7)
+    this.#fireflies = buildFireflies(map, rnd, this.#night)
+    this.#fireflies.visible = false
+    this.group.add(
+      buildBirds(map.size, this.#night),
+      this.#fireflies,
+      buildPetals(map, this.#night),
+    )
+  }
+
+  /** 0 = day, 1 = night: fades birds, shows fireflies. */
+  setNight(night01: number): void {
+    const n = Math.min(1, Math.max(0, night01))
+    this.#night.value = n
+    this.#fireflies.visible = n > 0.02
   }
 }
+
+/** @deprecated Prefer `new AmbientLife(map)`. */
+export const buildAmbient = (map: MobaMap): AmbientLife => new AmbientLife(map)
