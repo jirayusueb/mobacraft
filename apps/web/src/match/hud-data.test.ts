@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { FeedEntry, HeroLine, MatchSnapshot } from "@mobacraft/sim"
-import { AnnouncerTracker } from "./hud-data.ts"
+import { AnnouncerTracker, GoldHistory, SAMPLE_EVERY } from "./hud-data.ts"
 
 const hero = (over: Partial<HeroLine>): HeroLine =>
   ({
@@ -75,5 +75,28 @@ describe("AnnouncerTracker", () => {
     expect(a.map((b) => [b.kind, b.side])).toEqual([["ancient", "red"]])
     expect(tr.announce(snap({ time: 110 }), { blue: 0.8, red: 1 }, name)).toEqual([])
     expect(tr.announce(snap({ time: 200 }), { blue: 0.7, red: 1 }, name)).toHaveLength(1)
+  })
+})
+
+const at = (time: number, blue = time, red = 0) => snap({ time, gold: { blue, red } })
+
+describe("GoldHistory", () => {
+  test("throttles samples to SAMPLE_EVERY", () => {
+    const h = new GoldHistory()
+    h.sample(at(0))
+    h.sample(at(SAMPLE_EVERY / 2))
+    h.sample(at(SAMPLE_EVERY))
+    expect(h.samples.map((s) => s.t)).toEqual([0, SAMPLE_EVERY])
+  })
+
+  test("finish always records the final moment once and returns a copy", () => {
+    const h = new GoldHistory()
+    h.sample(at(10))
+    const done = h.finish(at(10.3, 99))
+    expect(done.gold.map((s) => s.t)).toEqual([10, 10.3])
+    expect(done.gold.at(-1)!.blue).toBe(99)
+    expect(h.finish(at(10.3)).gold).toHaveLength(2)
+    h.sample(at(50))
+    expect(done.gold).toHaveLength(2)
   })
 })

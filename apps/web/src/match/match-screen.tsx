@@ -14,7 +14,7 @@ import { Announcer, enqueue } from "./announcer.tsx"
 import { CALLS, CoachBar } from "./coach-bar.tsx"
 import type { FlowEvent } from "./flow.ts"
 import { HeroColumn } from "./hero-frame.tsx"
-import { AnnouncerTracker, type Banner, type GoldSample, pushSample } from "./hud-data.ts"
+import { AnnouncerTracker, type Banner, GoldHistory } from "./hud-data.ts"
 import { KillFeed } from "./kill-feed.tsx"
 import { Scoreboard } from "./scoreboard.tsx"
 
@@ -42,7 +42,7 @@ export const MatchScreen = ({
   )
   const [snap, setSnap] = useState<MatchSnapshot>(() => match.snapshot())
   const [banners, setBanners] = useState<readonly Banner[]>([])
-  const history = useRef<GoldSample[]>([])
+  const history = useRef(new GoldHistory())
   const announcer = useRef(new AnnouncerTracker())
 
   // Each side's own Ancient (for "under attack" banners), resolved once from map data.
@@ -56,7 +56,7 @@ export const MatchScreen = ({
   useEffect(() => {
     view.setPopulation(match)
     view.focus(map.size / 2, map.size / 2)
-    history.current = []
+    history.current = new GoldHistory()
     announcer.current = new AnnouncerTracker()
     return () => view.setPopulation(null)
   }, [view, match, map])
@@ -66,7 +66,7 @@ export const MatchScreen = ({
     const teamName = (s: DraftSide) => (s === "blue" ? draft.blue.name : draft.red.name)
     const id = setInterval(() => {
       const s = match.snapshot()
-      pushSample(history.current, s)
+      history.current.sample(s)
       const st = match.structures()
       const hp = (sid: string | undefined) => st.find((x) => x.id === sid)?.hp ?? 1
       const fresh = announcer.current.announce(
@@ -90,11 +90,7 @@ export const MatchScreen = ({
     if (!snap.winner) return
     const tid = setTimeout(() => {
       const final = match.snapshot()
-      pushSample(history.current, final)
-      const last = history.current.at(-1)
-      if (last && last.t < final.time)
-        history.current.push({ t: final.time, blue: final.gold.blue, red: final.gold.red })
-      dispatch({ _tag: "finished", final, history: { gold: history.current } })
+      dispatch({ _tag: "finished", final, history: history.current.finish(final) })
     }, 3500)
     return () => clearTimeout(tid)
   }, [snap.winner, match, dispatch])

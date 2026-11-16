@@ -24,10 +24,33 @@ export interface MatchHistory {
 /** Minimum game seconds between gold samples (keeps a 30-min match under ~2k points). */
 export const SAMPLE_EVERY = 1
 
-export const pushSample = (history: GoldSample[], snap: MatchSnapshot) => {
-  const last = history.at(-1)
-  if (last && snap.time - last.t < SAMPLE_EVERY) return
-  history.push({ t: snap.time, blue: snap.gold.blue, red: snap.gold.red })
+const sampleOf = (snap: MatchSnapshot): GoldSample => ({
+  t: snap.time,
+  blue: snap.gold.blue,
+  red: snap.gold.red,
+})
+
+/** Team gold over game time, sampled at most every `SAMPLE_EVERY` seconds. */
+export class GoldHistory {
+  readonly #samples: GoldSample[] = []
+
+  get samples(): readonly GoldSample[] {
+    return this.#samples
+  }
+
+  /** Records `snap` unless the last sample is too recent. */
+  sample(snap: MatchSnapshot): void {
+    const last = this.#samples.at(-1)
+    if (last && snap.time - last.t < SAMPLE_EVERY) return
+    this.#samples.push(sampleOf(snap))
+  }
+
+  /** Records the final state unconditionally (unless already at that time) and freezes a copy. */
+  finish(snap: MatchSnapshot): MatchHistory {
+    const last = this.#samples.at(-1)
+    if (!last || last.t < snap.time) this.#samples.push(sampleOf(snap))
+    return { gold: [...this.#samples] }
+  }
 }
 
 // --- feed parsing ----------------------------------------------------------------------
