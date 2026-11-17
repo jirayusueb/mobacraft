@@ -187,12 +187,15 @@ describe("match with tactics", () => {
     const m = createMatch(map, d, { seed: 5 })
     m.runToEnd(300)
     expect(m.call("blue", "group")).toBe(true)
-    // Not relayed instantly.
-    expect(m.snapshot().comms.filter((c) => c.side === "blue" && c.from === "coach")).toHaveLength(
-      0,
-    )
+    // The coach ack lands instantly (playtest fix #1) but has no followers yet.
+    const ack = m.snapshot().comms.filter((c) => c.side === "blue" && c.from === "coach")
+    expect(ack).toHaveLength(1)
+    expect(ack[0]!.followers).toBe(0)
     m.runToEnd(304)
-    const relayed = m.snapshot().comms.filter((c) => c.side === "blue" && c.from === "coach")
+    // The IGL relay follows with latency: followers join behind the caller.
+    const relayed = m
+      .snapshot()
+      .comms.filter((c) => c.side === "blue" && c.from === "coach" && c.followers > 0)
     expect(relayed).toHaveLength(1)
     expect(relayed[0]!.caller).not.toBeNull()
     expect(relayed[0]!.followers).toBeGreaterThanOrEqual(1)
