@@ -211,20 +211,23 @@ export const MAX_LEVEL = XP_CURVE.length
 const PASSIVE_GOLD = 2.2 // per second
 /** Seconds after an ally death that wards prefer the death area (spec/10 layer 4). */
 const DEFENSIVE_WARD_WINDOW = 60
-const CREEP_GOLD = 38
-const CREEP_XP = 55
+// Playtest #4 (dota-2-player feedback): last hits were only 30–110 per hero over
+// 19–28 min games — "this economy is kill gold, not Dota gold". Farm income raised
+// so laning/jungle heroes build a real net worth without touching kill gold.
+const CREEP_GOLD = 58 // was 38
+const CREEP_XP = 66 // was 55
 const KILL_GOLD = 220
 const KILL_XP = 180
 const ASSIST_GOLD = 90
 const TOWER_GOLD = 160 // to every hero on the team
-const NEUTRAL_GOLD = 55
-const NEUTRAL_XP = 70
+const NEUTRAL_GOLD = 80 // was 55: jungle camps must out-earn lane creeps
+const NEUTRAL_XP = 95 // was 70
 const ROSHAN_GOLD = 200
 const XP_RANGE = 9
 export const RESPAWN_BASE = 6
 export const RESPAWN_PER_LEVEL = 2.2
 const WAVE_INTERVAL = 30
-const CAMP_RESPAWN = 60
+const CAMP_RESPAWN = 48 // was 60: a dedicated jungler gets a clear-respawn loop
 export const ROSHAN_RESPAWN = 240
 
 type UnitType = "hero" | "creep" | "neutral" | "roshan" | "tower" | "ancient" | "rax"

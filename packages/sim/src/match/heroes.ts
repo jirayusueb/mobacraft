@@ -831,6 +831,9 @@ const PATCH: Readonly<Record<string, Patch>> = {
   lumenmaid: { skillScale: 0.85, skillCooldown: 8 },
   // 75–82% win rate: AoE skill + 300 ult outclassed other mids.
   embercall: { skillScale: 0.85, ultScale: 0.85 },
+  // Playtest #4: 0/0/1 with 0.2k hero damage in 14 min, then 2/8/4 with the
+  // lowest net worth — beast jungler couldn't farm or skirmish.
+  goreclaw: { hp: 760, damage: 56, skillScale: 1.25, skillCooldown: 7 },
 }
 
 const scaleAbility = (a: Ability, k: number, cd?: number): Ability => ({
