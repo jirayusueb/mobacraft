@@ -175,7 +175,7 @@ export const HISTORY_EVERY = 5
 /** Phase transitions (spec/06 §1), game seconds. */
 export const MID_AT = 7 * 60
 export const LATE_AT = 15 * 60
-export const ANTI_STALL_AT = 25 * 60
+export const ANTI_STALL_AT = 22 * 60
 
 export type GoldSource =
   | "passive"
@@ -1275,6 +1275,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
     if (phase === "laning" && target.type === "tower" && (target.structure?.tier ?? 1) === 1)
       dmg *= 0.75
+    // Anti-stall (spec/06): from ANTI_STALL_AT, high ground erodes so a team
+    // that has already broken barracks can close instead of trading forever.
+    if (target.structure && clock >= ANTI_STALL_AT) dmg *= 1 + (clock - ANTI_STALL_AT) / 60
     if (target.st.shield > 0) {
       const absorbed = Math.min(target.st.shield, dmg)
       target.st.shield -= absorbed
