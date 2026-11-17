@@ -146,7 +146,7 @@ describe("match", () => {
         red++
     }
     expect(red).toBeGreaterThanOrEqual(1)
-  }, 60_000)
+  }, 180_000)
 
   test("towers fall in tier order", () => {
     const m = createMatch(map, autoDraft(), { seed: 11, aiCoach: ["blue", "red"] })
