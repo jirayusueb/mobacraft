@@ -140,3 +140,20 @@ Where this section and §1–§4 disagree, this section wins.
     `attack`; at ×8, `attack` never steps backwards within a swing; overlay-on
     frame cost ≤ 2 ms CPU for the debug layer (measured in the browser via
     `performance.now()` around the layer update).
+
+## Implementation verdict — PASS with one open measurement (commits 49b10b6, 6b01a08, 921e8fc)
+
+- Acceptance 1–3 are covered by `combat-readability.test.ts` (sim), plus
+  `combat-anim.test.ts` and `input-state.test.ts` in the engine (backquote
+  never pans). Pause freezes the swing, and at ×8 `attack` never steps
+  backwards.
+- Acceptance 4: tests on a clean checkout of f6b9684 pass (sim 224/224,
+  engine 45/45). In the browser, backquote toggles the overlay with 0 console
+  errors; see `docs/design/shot-crowd-debug-overlay.png`.
+- **Open:** the overlay's ≤ 2 ms CPU budget is unproven. The automated browser
+  frame-capped at ~33.6 ms per frame with and without the overlay, so the
+  layer's own cost could not be isolated. Measure it with
+  `world.debugMs()` in a real browser session.
+- Follow-up bug found in play and fixed in 921e8fc: the death clip never reset
+  on respawn or Aegis revive. The hero stayed sunk underground while its bar
+  and attacks still showed.
