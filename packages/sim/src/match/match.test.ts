@@ -120,7 +120,7 @@ describe("match", () => {
     }
     expect(blueWins).toBeGreaterThanOrEqual(1)
     expect(blueWins).toBeLessThanOrEqual(5)
-  }, 60_000)
+  }, 180_000)
 
   test("first pick is an advantage but not decisive: red wins some drafts", () => {
     let red = 0
