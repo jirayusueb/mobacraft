@@ -2,18 +2,12 @@
  * Results charts — sim-owned economy history (NW + XP lead, phase bands, event
  * ticks), item timeline per hero, gold sources and hero damage.
  */
-import {
-  type DraftSide,
-  type DraftState,
-  type HeroLine,
-  type MatchSnapshot,
-  lookupItem,
-} from "@mobacraft/sim"
+import { type DraftSide, type DraftState, type HeroLine, type MatchSnapshot } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
 import { Sparkles } from "lucide-react"
 import { useMemo } from "react"
 import { leadMarkers, leadSeries, phaseBands } from "./hud-data.ts"
-import { ItemSlot } from "./item-icon.tsx"
+import { ItemSlot, itemName } from "./item-icon.tsx"
 import { NetWorthBars, SourceBars } from "./live/economy-bars.tsx"
 import { LeadChart } from "./live/lead-chart.tsx"
 import { HeroGem, clockText } from "./ui.tsx"
@@ -92,7 +86,7 @@ export const ItemTimeline = ({ final, you }: { final: MatchSnapshot; you: DraftS
                     ? own
                         .map(
                           (b) =>
-                            `${lookupItem(b.itemId).name} at ${clockText(b.t)}${b.adaptive ? " (adaptive)" : ""}`,
+                            `${itemName(b.itemId)} at ${clockText(b.t)}${b.adaptive ? " (adaptive)" : ""}`,
                         )
                         .join(", ")
                     : "no purchases"
@@ -104,7 +98,7 @@ export const ItemTimeline = ({ final, you }: { final: MatchSnapshot; you: DraftS
                     key={i}
                     className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2"
                     style={{ left: `${(b.t / tMax) * 100}%` }}
-                    title={`${clockText(b.t)} · ${lookupItem(b.itemId).name}${b.adaptive ? " · adaptive" : ""}`}
+                    title={`${clockText(b.t)} · ${itemName(b.itemId)}${b.adaptive ? " · adaptive" : ""}`}
                   >
                     <span
                       className={cn(

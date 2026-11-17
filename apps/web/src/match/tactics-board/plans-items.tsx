@@ -7,9 +7,8 @@ import {
   type ShopTiming,
   buildById,
   buildsFor,
-  itemById,
 } from "@mobacraft/sim"
-import { ItemSlot } from "../item-icon.tsx"
+import { ItemSlot, itemName } from "../item-icon.tsx"
 import { HeroGem } from "../ui.tsx"
 import { RadioCards, Section, Select, Switch } from "./controls.tsx"
 import { COPY } from "./copy.ts"
@@ -87,7 +86,7 @@ export const ItemsSection = ({ draft, you, tactics, update }: SectionProps) => {
                 />
                 <span className="flex flex-1 items-center gap-1">
                   <span className="sr-only">
-                    {COPY.itemsSr(build.items.map((i) => itemById(i).name).join(", "))}
+                    {COPY.itemsSr(build.items.map(itemName).join(", "))}
                   </span>
                   {build.items.map((id, i) => (
                     // oxlint-disable-next-line react/no-array-index-key -- builds may repeat an item

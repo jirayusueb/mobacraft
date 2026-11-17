@@ -10,6 +10,7 @@ import {
   createMatch,
   heroDef,
   isComplete,
+  TIME_WARNING_LEAD,
   type DraftState,
 } from "../index.ts"
 
@@ -218,4 +219,21 @@ describe("itemization in a live match (spec/10)", () => {
       expect(s.netWorth[side]).toBe(lines.reduce((a, h) => a + h.netWorth, 0))
     }
   }, 60_000)
+})
+
+describe("time limit", () => {
+  test("warns once, TIME_WARNING_LEAD before the cap, then ends on objectives", () => {
+    const m = createMatch(map, autoDraft(), { seed: 4, maxTime: 200 })
+    m.runToEnd(200 - TIME_WARNING_LEAD - 1)
+    expect(m.snapshot().feed.some((f) => f.kind === "time-warning")).toBe(false)
+    m.runToEnd()
+    const s = m.snapshot()
+    const warns = s.feed.filter((f) => f.kind === "time-warning")
+    expect(warns).toHaveLength(1)
+    expect(warns[0]!.t).toBeGreaterThanOrEqual(200 - TIME_WARNING_LEAD)
+    expect(warns[0]!.t).toBeLessThan(200 - TIME_WARNING_LEAD + 0.2)
+    expect(warns[0]!.text).toMatch(/^2 minutes left/)
+    expect(s.winner).not.toBeNull()
+    expect(s.feed.at(-1)!.text).toMatch(/^Time!/)
+  })
 })

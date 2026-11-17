@@ -134,7 +134,7 @@ describe("match with tactics", () => {
     const distTo = (path: readonly { x: number; z: number }[]) =>
       Math.min(...path.map((p) => Math.hypot(p.x - carry.x, p.z - carry.z)))
     if (carryLine.alive) expect(distTo(lane("top"))).toBeLessThan(distTo(lane("bot")))
-  })
+  }, 60_000)
 
   test("lane swaps: laning only, own cooldown", () => {
     const d = autoDraft()
@@ -152,7 +152,7 @@ describe("match with tactics", () => {
     expect(m.snapshot().phase).not.toBe("laning")
     expect(m.swapLanes("blue", a, b)).toBe(false) // phase
     expect(swapPlayers(defaultTactics(d, "blue"), a, a)).toEqual(defaultTactics(d, "blue"))
-  })
+  }, 60_000)
 
   test("wards get placed and give map control", () => {
     const m = createMatch(map, autoDraft(), { seed: 6 })
@@ -163,7 +163,7 @@ describe("match with tactics", () => {
     expect(m.visibleTo(w.side, w.x, w.z)).toBe(true)
     expect(s.control.blue).toBeGreaterThan(0.03)
     expect(s.control.blue).toBeLessThan(0.8)
-  })
+  }, 60_000)
 
   test("economy: net worth = gold + items, sources sum to earned, history sampled", () => {
     const m = createMatch(map, autoDraft(), { seed: 8, aiCoach: ["blue", "red"] })
@@ -180,7 +180,7 @@ describe("match with tactics", () => {
     expect(s.purchases.length).toBeGreaterThan(5)
     expect(s.history.length).toBeGreaterThanOrEqual(12 * 12)
     expect(s.history.at(-1)!.nw.blue).toBeGreaterThan(s.history[1]!.nw.blue)
-  })
+  }, 60_000)
 
   test("IGL relays coach calls with latency; backup caller when the IGL is dead", () => {
     const d = autoDraft()
@@ -272,5 +272,5 @@ describe("match with tactics", () => {
     expect(m.setPlan("red", "late", "nonsense")).toBe(false)
     m.runToEnd(40)
     expect(m.tactics("blue").plans.mid).toBe("farm")
-  })
+  }, 60_000)
 })

@@ -172,6 +172,7 @@ export const ANNOUNCER: Record<string, string> = {
   ancient: "Ancient Under Attack",
   "phase-mid": "Mid Game",
   "phase-late": "Late Game",
+  "time-warning": "Two Minutes Left",
 }
 
 /** spec/06 game phases (MatchSnapshot.phase). */

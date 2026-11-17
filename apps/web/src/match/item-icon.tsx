@@ -46,9 +46,27 @@ const ITEM_TINT: Readonly<Record<string, string>> = {
 /** Items with painted icons in `public/items/<id>.webp`; others keep the lucide glyph. */
 const ITEM_ART: ReadonlySet<string> = new Set(Object.keys(ITEM_ICON))
 
+/**
+ * Hover text for an item. Never throws: an id the catalogue does not know yet
+ * (new item families land in the sim before the HUD) falls back to the raw id
+ * instead of crashing the whole match screen.
+ */
+/** Display name for an item id; unknown ids fall back to the id (never throws). */
+export const itemName = (id: string): string => {
+  try {
+    return lookupItem(id).name
+  } catch {
+    return id
+  }
+}
+
 export const itemText = (id: string) => {
-  const it = lookupItem(id)
-  return `${it.name} · ${it.cost.toLocaleString()} gold`
+  try {
+    const it = lookupItem(id)
+    return `${it.name} · ${it.cost.toLocaleString()} gold`
+  } catch {
+    return id
+  }
 }
 
 /**

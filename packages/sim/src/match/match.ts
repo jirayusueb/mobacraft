@@ -135,6 +135,9 @@ import {
 } from "./fog.ts"
 import { TeamKnowledge } from "./knowledge.ts"
 
+/** How long before the time cap the tiebreak warning fires (game seconds). */
+export const TIME_WARNING_LEAD = 120
+
 export type CoachCall = "group" | "roshan" | "push" | "safe" | "farm"
 export const CALL_COOLDOWN = 60
 export const CALL_DURATION = 40
@@ -442,6 +445,7 @@ export interface FeedEntry {
     | "phase"
     | "ward"
     | "swap"
+    | "time-warning"
     | "item"
   readonly side: DraftSide | "neutral"
   readonly text: string
@@ -630,6 +634,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   let waveNo = 0
   let uid = 1
   let winner: DraftSide | null = null
+  /** The 2-minute tiebreak warning fires once per match. */
+  let timeWarned = false
   const feed: FeedEntry[] = []
   let fxQueue: FxEvent[] = []
   let firstBlood = false
@@ -3208,6 +3214,27 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       }
     }
 
+    if (!timeWarned && !winner && clock >= maxTime - TIME_WARNING_LEAD) {
+      timeWarned = true
+      const leader =
+        towersDown.blue !== towersDown.red
+          ? towersDown.blue > towersDown.red
+            ? "blue"
+            : "red"
+          : kills.blue !== kills.red
+            ? kills.blue > kills.red
+              ? "blue"
+              : "red"
+            : null
+      feed.push({
+        t: clock,
+        kind: "time-warning",
+        side: leader ?? "neutral",
+        text: leader
+          ? `2 minutes left — ${leader === "blue" ? draft.blue.name : draft.red.name} lead on objectives`
+          : "2 minutes left — objectives are level",
+      })
+    }
     if (clock >= maxTime && !winner) {
       winner =
         towersDown.blue !== towersDown.red

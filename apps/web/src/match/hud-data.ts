@@ -211,6 +211,7 @@ export type BannerKind =
   | "wipe"
   | "ancient"
   | "phase"
+  | "time"
 
 export interface Banner {
   readonly id: number
@@ -360,6 +361,15 @@ export class AnnouncerTracker {
         })
         break
       }
+      case "time-warning":
+        this.#add({
+          kind: "time",
+          side,
+          title: ANNOUNCER["time-warning"]!,
+          detail: f.text.split(" — ")[1] ?? f.text,
+          priority: 7,
+        })
+        break
       case "phase": {
         const late = f.text.startsWith("Late")
         this.#add({

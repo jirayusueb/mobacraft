@@ -61,6 +61,20 @@ describe("AnnouncerTracker", () => {
     expect(more[0]!.id).toBeGreaterThan(first[0]!.id)
   })
 
+  test("tiebreak warning becomes a high-priority time banner", () => {
+    const tr = new AnnouncerTracker()
+    const warn: FeedEntry = {
+      t: 2280,
+      kind: "time-warning",
+      side: "blue",
+      text: "2 minutes left — ANA lead on objectives",
+    }
+    const out = tr.announce(snap({ feed: [warn] }), full, name)
+    expect(out.map((b) => b.kind)).toEqual(["time"])
+    expect(out[0]!.detail).toBe("ANA lead on objectives")
+    expect(out[0]!.priority).toBeGreaterThanOrEqual(7)
+  })
+
   test("multi-kills inside the window escalate", () => {
     const tr = new AnnouncerTracker()
     const out = tr.announce(snap({ feed: [kill(1), kill(3), kill(5)] }), full, name)

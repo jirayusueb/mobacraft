@@ -60,7 +60,8 @@ const FeedRow = ({
         tone === "neutral" && "border-l-violet-400",
         (f.kind === "call" || f.kind === "swap" || f.kind === "ward") &&
           "bg-neutral-950/40 text-white/60",
-        f.kind === "phase" && "font-semibold tracking-wide text-white/90",
+        (f.kind === "phase" || f.kind === "time-warning") &&
+          "font-semibold tracking-wide text-white/90",
         f.kind === "ancient" && "py-1.5 text-[13px] font-semibold",
       )}
     >

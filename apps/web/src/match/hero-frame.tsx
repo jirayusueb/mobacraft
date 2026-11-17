@@ -1,11 +1,11 @@
 import { MAX_LEVEL, RESPAWN_BASE, RESPAWN_PER_LEVEL } from "@mobacraft/sim"
 /** Hero frames — one compact card per hero down each side of the screen. */
-import { type HeroLine, MAX_ITEMS, lookupItem } from "@mobacraft/sim"
+import { type HeroLine, MAX_ITEMS } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
 import { Coins, Crown, Skull } from "lucide-react"
 import { INTENT_LABEL } from "../strings.ts"
 import { goldK } from "./hud-data.ts"
-import { ItemSlot } from "./item-icon.tsx"
+import { ItemSlot, itemName } from "./item-icon.tsx"
 import { HeroGem } from "./ui.tsx"
 
 /** Sim XP_CURVE length; used only to draw the level ring's fill. */
@@ -96,7 +96,7 @@ const HeroFrame = ({
   const dead = !h.alive
   const ult = h.level >= ULT_LEVEL
   const slots = Array.from({ length: MAX_ITEMS }, (_, i) => h.items[i])
-  const inv = h.items.map((i) => lookupItem(i).name).join(", ")
+  const inv = h.items.map(itemName).join(", ")
   const respawnFrac = respawnTotal > 0 ? Math.min(1, h.respawnIn / respawnTotal) : 0
   return (
     <button
