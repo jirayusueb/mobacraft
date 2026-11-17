@@ -10,7 +10,8 @@
 export const RING1_GAP = 0.7
 export const RING2_GAP = 0.85
 /** Arc length per slot (tiles) — a hero body (Ø 0.8) plus a sliver. */
-export const SLOT_ARC = 0.84
+/** Arc length per slot: fits two mid-size heroes (hull ~0.5) side by side. */
+export const SLOT_ARC = 1.0
 /** Weight of the arc term in slot cost (`dist + ARC_WEIGHT · r · |Δθ|`). */
 export const ARC_WEIGHT = 0.6
 /** Attackers reserve within this distance (micro range) and release beyond RELEASE_AT. */

@@ -207,11 +207,15 @@ describe("yielding", () => {
 })
 
 describe("attack rings", () => {
-  test("geometry: hero target gets 8 inner slots, all within melee reach", () => {
+  test("geometry: hero target slots fit mid-size attackers and stay in melee reach", () => {
     const g = ringGeometry(0.4)
-    expect(g.n1).toBe(8)
+    // Slot arc 1.0 (two hull-0.5 heroes side by side) → 6 inner slots on a hero target.
+    expect(g.n1).toBe(6)
     expect(g.r1).toBeLessThanOrEqual(reach(1.2, 0.4))
     expect(g.n2).toBeGreaterThan(g.n1)
+    // Roshan-sized target: bigger ring, still clamped by the slot cap.
+    const big = ringGeometry(1.4)
+    expect(big.n1).toBe(12)
   })
 
   test("reserves the cheapest slot facing the attacker, distinct per attacker", () => {
@@ -222,7 +226,7 @@ describe("attack rings", () => {
     expect(g1.x).toBeGreaterThan(10.9) // east side, toward the attacker
     const s2 = rings.request("b", { x: 13, z: 10 }, "t", t, 0.4, 1.7)!
     expect(s2).not.toEqual(s1)
-    expect(rings.free("t", 1)).toBe(6)
+    expect(rings.free("t", 1)).toBe(4)
   })
 
   test("long-reach melee prefers ring 2", () => {
@@ -233,7 +237,8 @@ describe("attack rings", () => {
   test("full ring 1 overflows to ring 2; release frees the slot", () => {
     const rings = new AttackRings()
     const t = { x: 0, z: 0 }
-    for (let i = 0; i < 8; i++)
+    const n1 = ringGeometry(0.4).n1
+    for (let i = 0; i < n1; i++)
       expect(rings.request(`a${i}`, { x: 3, z: 0 }, "t", t, 0.4, 1.7)!.ring).toBe(1)
     expect(rings.request("late", { x: 3, z: 0 }, "t", t, 0.4, 1.7)!.ring).toBe(2)
     rings.release("a0")
@@ -246,7 +251,7 @@ describe("attack rings", () => {
     const rings = new AttackRings()
     const t = { x: 0, z: 0 }
     const far = new Map<string, { x: number; z: number }>()
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < ringGeometry(0.4).n1; i++) {
       rings.request(`h${i}`, { x: 3, z: 0 }, "t", t, 0.4, 1.7)
       far.set(`h${i}`, { x: 2.9, z: 0 })
     }
@@ -281,7 +286,8 @@ describe("attack rings", () => {
   test("preemption never steals from a holder already in reach", () => {
     const rings = new AttackRings()
     const t = { x: 0, z: 0 }
-    for (let i = 0; i < 8; i++) rings.request(`h${i}`, { x: 3, z: 0 }, "t", t, 0.4, 1.7)
+    for (let i = 0; i < ringGeometry(0.4).n1; i++)
+      rings.request(`h${i}`, { x: 3, z: 0 }, "t", t, 0.4, 1.7)
     expect(
       rings.preempt(
         "arr",

@@ -26,6 +26,7 @@ import type {
   SwingPhase,
   Unit,
 } from "../population.ts"
+import { hullOf } from "./crowd-hull.ts"
 import { heroSwing } from "./swing-timing.ts"
 import type { DraftSide, DraftState } from "./draft.ts"
 import { type Ability, type Effect, type HeroDef, type Role, heroDef } from "./heroes.ts"
@@ -900,15 +901,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const lockCasts = { total: 0, onLock: 0 }
   /** Ability usage counters (balance reports / tests). */
   const casts = new Map<string, number>()
-  /** Crowd radii (spec/09 §2), keyed on unit class; structures are static. */
-  const crowdRadius = (b: Body) =>
-    b.type === "roshan"
-      ? 0.9
-      : b.kind.toString().includes("siege")
-        ? 0.45
-        : b.type === "hero"
-          ? 0.4
-          : 0.35
+  /** Crowd radii (spec/09 §2): per-kind hulls matching the rendered model footprints. */
+  const crowdRadius = (b: Body) => hullOf(b.kind)
   const newMover = (b: Body): Mover => {
     const m: Mover = {
       id: b.id,
