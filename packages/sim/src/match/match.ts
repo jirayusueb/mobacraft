@@ -123,9 +123,9 @@ import {
   WARD_START,
   type WardSpot,
   createVisionGrid,
-  wardSpots,
   zoneFor,
 } from "./vision.ts"
+import { losWardSpots } from "./ward-spots.ts"
 import {
   ATTACK_REVEAL_RADIUS,
   ATTACK_REVEAL_TICKS,
@@ -742,7 +742,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const cutTrees: TreeEvent[] = []
   const control = { blue: 0, red: 0 }
   let visionTimer = 0
-  const spots: readonly WardSpot[] = wardSpots(map)
+  const spots: readonly WardSpot[] = losWardSpots(map, staticFog)
   interface Ward {
     id: string
     side: DraftSide
