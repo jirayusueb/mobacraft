@@ -281,6 +281,27 @@ export const ITEMS: readonly Item[] = [
     active: { cooldown: 22, trigger: "selfCleanse" },
     manaRegen: 1.5,
   },
+  {
+    id: "manta",
+    name: "Manta Style",
+    cost: 2300,
+    tier: 4,
+    components: ["bow", "orb"],
+    tags: ["dispel", "evasion"],
+    damage: 12,
+    attackSpeed: 0.15,
+    speed: 0.1,
+    active: { cooldown: 30, trigger: "selfCleanse" },
+  },
+  {
+    id: "tango",
+    name: "Tango",
+    cost: 90,
+    tier: 1,
+    components: [],
+    tags: ["consumable", "sustain"],
+    active: { cooldown: 0, trigger: "regen" },
+  },
 ]
 
 export const itemById = (id: string): Item => {

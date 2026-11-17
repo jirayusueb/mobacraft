@@ -237,3 +237,11 @@ describe("time limit", () => {
     expect(s.feed.at(-1)!.text).toMatch(/^Time!/)
   })
 })
+
+describe("S5a actives in a live match (spec/10)", () => {
+  test("heroes eat Tangos during laning", () => {
+    const m = createMatch(map, autoDraft(), { seed: 4 })
+    m.runToEnd(6 * 60)
+    expect(m.thinkStats().actives.tango ?? 0).toBeGreaterThan(0)
+  }, 60_000)
+})
