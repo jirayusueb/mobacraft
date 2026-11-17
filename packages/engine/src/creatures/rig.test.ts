@@ -222,6 +222,23 @@ describe("creature motion state", () => {
     expect(s.death).toBeGreaterThan(DEATH_TIME * 0.9)
   })
 
+  test("a respawned hero leaves the death pose (not stuck sunk underground)", () => {
+    const s = createAnimState(mkUnit({ hp: 1 }))
+    for (let i = 0; i < 120; i++) stepAnim(s, mkUnit({ hp: 0, alive: false }), 1 / 60, 1)
+    expect(s.death).toBe(1)
+    // Respawn at the fountain (teleport) — must render alive again.
+    stepAnim(s, mkUnit({ hp: 1, alive: true, x: 60 }), 1 / 60, 1)
+    expect(s.death).toBe(-1)
+  })
+
+  test("an Aegis revive mid-death-clip (alive again in place) ends the clip", () => {
+    const s = createAnimState(mkUnit({ hp: 1 }))
+    for (let i = 0; i < 20; i++) stepAnim(s, mkUnit({ hp: 0, alive: false }), 1 / 60, 1)
+    expect(s.death).toBeGreaterThan(0)
+    stepAnim(s, mkUnit({ hp: 1, alive: true }), 1 / 60, 1)
+    expect(s.death).toBe(-1)
+  })
+
   test("heading turns along the shortest arc", () => {
     const s = createAnimState(mkUnit({ heading: 3 }))
     stepAnim(s, mkUnit({ heading: -3 }), 1 / 60, 1)

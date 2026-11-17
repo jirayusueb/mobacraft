@@ -131,7 +131,12 @@ export const stepAnim = (
   if (hp < s.hp - 0.02 && s.death < 0) s.hit = 1
   s.hp = hp
   if (s.hit > 0) s.hit = Math.max(0, s.hit - dt * 2.2)
-  // Death clip.
+  // Death clip; a respawn or Aegis revive (alive again) ends it, or the unit would
+  // stay sunk below the ground forever while still moving and attacking.
+  if (u.alive !== false && s.death >= 0) {
+    s.death = -1
+    s.hit = 0
+  }
   if (u.alive === false && s.death < 0) s.death = 0
   if (s.death >= 0 && s.death < 1) s.death = Math.min(1, s.death + dt / DEATH_TIME)
 }
