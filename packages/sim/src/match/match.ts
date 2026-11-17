@@ -180,6 +180,7 @@ export const ANTI_STALL_AT = 25 * 60
 
 export type GoldSource =
   | "passive"
+  | "comeback"
   | "creeps"
   | "neutrals"
   | "kills"
@@ -189,6 +190,7 @@ export type GoldSource =
   | "wards"
 export const GOLD_SOURCES: readonly GoldSource[] = [
   "passive",
+  "comeback",
   "creeps",
   "neutrals",
   "kills",
@@ -209,6 +211,16 @@ const XP_CURVE = [
 ]
 export const MAX_LEVEL = XP_CURVE.length
 const PASSIVE_GOLD = 2.2 // per second
+/**
+ * Comeback lever (playtest #2): the side behind on team net worth banks extra
+ * passive gold proportional to the deficit. Team rate is clamp(deficit/8000·0.8,
+ * 0, 0.8) gp/s (8k behind ≈ +1 passive gp/s equivalent), split over 5 heroes.
+ * The leading side never gets a penalty.
+ */
+const COMEBACK_PER_8000 = 0.8
+const COMEBACK_MAX = 0.8
+/** Net-worth gap below which no comeback gold flows (anti flip-flop band). */
+const COMEBACK_DEADBAND = 500
 /** Seconds after an ally death that wards prefer the death area (spec/10 layer 4). */
 const DEFENSIVE_WARD_WINDOW = 60
 // Playtest #4 (dota-2-player feedback): last hits were only 30–110 per hero over
@@ -675,6 +687,7 @@ const compact = <T>(arr: T[], keep: (x: T) => boolean) => {
 const ready = (h: HeroState, id: string) => h.items.includes(id) && (h.itemCd[id] ?? 0) <= 0
 const emptySources = (): Record<GoldSource, number> => ({
   passive: 0,
+  comeback: 0,
   creeps: 0,
   neutrals: 0,
   kills: 0,
@@ -3397,6 +3410,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     // Spell projectiles move and resolve after status, before hero actions (spec/09).
     tickProjectiles(dt)
 
+    // Comeback lever (playtest #2): extra passive gold for the side behind on net worth.
+    const cbGap = sideSum("blue", netWorthOf) - sideSum("red", netWorthOf)
+    const cbSide: DraftSide | null =
+      cbGap > COMEBACK_DEADBAND ? "red" : cbGap < -COMEBACK_DEADBAND ? "blue" : null
+    const cbPerHero = cbSide
+      ? Math.min(COMEBACK_MAX, (Math.abs(cbGap) / 8000) * COMEBACK_PER_8000) / 5
+      : 0
+
     // Heroes
     for (let bi = 0; bi < heroes.length; bi++) {
       const b = heroes[bi]!
@@ -3427,6 +3448,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         recomputeStats(b)
       }
       sources[h.side].passive += PASSIVE_GOLD * dt
+      if (cbSide && h.side === cbSide) {
+        h.gold += cbPerHero * dt
+        h.goldEarned += cbPerHero * dt
+        sources[h.side].comeback += cbPerHero * dt
+      }
       h.skillCd = Math.max(0, h.skillCd - dt)
       h.ultCd = Math.max(0, h.ultCd - dt)
       h.mana = Math.min(h.maxMana, h.mana + h.manaRegen * dt)
