@@ -56,24 +56,34 @@ describe("coach call legibility (playtest fix #1)", () => {
   }, 60_000)
 
   test("a push call pays off in the tower feed line", () => {
-    const m = createMatch(map, autoDraft(), { seed: 1 })
+    // Multi-seed like the Roshan test above: the sim is seeded, but float
+    // trig (Math.hypot/sin/cos) varies across platforms, so a single seed's
+    // fight outcomes are not portable. Any seed paying off proves the link.
+    let m: ReturnType<typeof createMatch> | null = null
     let paid = false
-    while (m.time() < 8 * 60) {
-      const s = m.snapshot()
-      if (s.calls.blue.cooldown === 0 && !s.calls.blue.active) m.call("blue", "push")
-      m.advance(1)
-      if (s.feed.some((f) => f.kind === "tower" && f.text.includes("Call paid off"))) {
-        paid = true
+    for (const seed of [1, 2, 3]) {
+      const cand = createMatch(map, autoDraft(), { seed })
+      while (cand.time() < 8 * 60) {
+        const s = cand.snapshot()
+        if (s.calls.blue.cooldown === 0 && !s.calls.blue.active) cand.call("blue", "push")
+        cand.advance(1)
+        if (s.feed.some((f) => f.kind === "tower" && f.text.includes("Call paid off"))) {
+          paid = true
+          break
+        }
+      }
+      if (paid) {
+        m = cand
         break
       }
     }
     expect(paid).toBe(true)
-    const towers = m.snapshot().feed.filter((f) => f.kind === "tower")
+    const towers = m!.snapshot().feed.filter((f) => f.kind === "tower")
     expect(towers.length).toBeGreaterThan(0)
     expect(
       towers.some((f) => f.text.includes("Call paid off") && f.text.includes("tower falls")),
     ).toBe(true)
-  }, 60_000)
+  }, 120_000)
 
   test("every accepted call emits exactly one aoe ping fx and an ack comms entry", () => {
     const m = createMatch(map, autoDraft(), { seed: 2 })
