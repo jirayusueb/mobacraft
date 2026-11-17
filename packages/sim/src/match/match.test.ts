@@ -245,3 +245,26 @@ describe("S5a actives in a live match (spec/10)", () => {
     expect(m.thinkStats().actives.tango ?? 0).toBeGreaterThan(0)
   }, 60_000)
 })
+
+describe("S5b actives in live matches (spec/10)", () => {
+  test("supports with save items rescue allies; wards still placed; deterministic", () => {
+    let saves = 0
+    let wardsPlaced = 0
+    for (const seed of [3, 9, 21]) {
+      const m = createMatch(map, autoDraft(), { seed, aiCoach: ["blue", "red"] })
+      m.runToEnd(22 * 60)
+      const a = m.thinkStats().actives
+      saves += (a.glimmer ?? 0) + (a.force ?? 0)
+      wardsPlaced +=
+        m.snapshot().wards.length + m.snapshot().feed.filter((f) => f.kind === "ward").length
+    }
+    expect(saves).toBeGreaterThan(0)
+    expect(wardsPlaced).toBeGreaterThan(0)
+    const run = () => {
+      const m = createMatch(map, autoDraft(), { seed: 9, aiCoach: ["blue", "red"] })
+      m.runToEnd(12 * 60)
+      return JSON.stringify(m.thinkStats().actives)
+    }
+    expect(run()).toBe(run())
+  }, 240_000)
+})

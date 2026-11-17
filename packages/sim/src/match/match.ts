@@ -104,6 +104,7 @@ import {
   initiatorEngage,
   kiteVector,
   BKB_DURATION,
+  GLIMMER_DURATION,
   TANGO_DURATION,
   TANGO_HEAL,
   tangoTrigger,
@@ -202,6 +203,8 @@ const XP_CURVE = [
 ]
 export const MAX_LEVEL = XP_CURVE.length
 const PASSIVE_GOLD = 2.2 // per second
+/** Seconds after an ally death that wards prefer the death area (spec/10 layer 4). */
+const DEFENSIVE_WARD_WINDOW = 60
 const CREEP_GOLD = 38
 const CREEP_XP = 55
 const KILL_GOLD = 220
@@ -236,6 +239,8 @@ interface Status {
   immune: number
   /** Eul's cyclone seconds left: invulnerable, can't act. */
   cyclone: number
+  /** Glimmer Cape seconds left: invisible to enemies (spec/10 S5b). */
+  glimmer: number
 }
 
 interface Body {
@@ -295,6 +300,8 @@ interface Body {
   /** Desired velocity for the avoidance pass (tiles/s). */
   vx?: number
   vz?: number
+  /** Stun/root seconds left, mirrored for the brain's save scan (spec/10 S5b). */
+  disabledFor?: number
   /** Free-path timer: re-path A* when it hits 0 (spec/09 locomotion). */
   freePath?: number
   /** Ground speed magnitude for the renderer's gait. */
@@ -590,6 +597,7 @@ const polyline = (path: readonly Vec2[]) => {
 const emptyStatus = (): Status => ({
   stun: 0,
   root: 0,
+  glimmer: 0,
   slow: 0,
   slowT: 0,
   shield: 0,
@@ -768,6 +776,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     spotId: string
   }
   let wards: Ward[] = []
+  /** Where each side last lost a hero (defensive ward target, spec/10 layer 4). */
+  const lastDeathAt: Record<DraftSide, { x: number; z: number; t: number } | null> = {
+    blue: null,
+    red: null,
+  }
   const wardStock = {
     blue: { charges: WARD_START, next: WARD_RECHARGE },
     red: { charges: WARD_START, next: WARD_RECHARGE },
@@ -1188,7 +1201,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (target.structure && !vulnerable(target)) return
     let dmg = raw * (kind === "physical" ? mitigation(target) : 0.85)
     if (kind === "magic" && target.hero)
-      dmg *= 1 - Math.min(0.6, itemSum(target.hero, "magicResist"))
+      dmg *=
+        1 - Math.min(0.6, itemSum(target.hero, "magicResist") + (target.st.glimmer > 0 ? 0.25 : 0))
     if (src?.hero && target.hero) {
       const m = matchupMul(src.hero.def.id, target.hero.def.id)
       dmg *= phase === "laning" ? 1 + (m - 1) * 0.5 : m
@@ -1258,6 +1272,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     rings.release(target.id)
     if (target.swing) target.swing = newSwing()
     fx({ t: clock, kind: "death", at: { x: target.x, z: target.z }, team: target.team })
+    if (target.hero) lastDeathAt[target.hero.side] = { x: target.x, z: target.z, t: clock }
     const killer = src?.hero ? src : target.lastHit?.hero ? target.lastHit : undefined
 
     if (target.type === "hero") {
@@ -1915,6 +1930,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   /** Targeting: fight what you collide with; knowledge reads go through the fog (spec/08 §3). */
   const seen = (viewer: Body, o: Body) =>
     o.type !== "hero" ||
+    (o.st.glimmer > 0 && o.team !== viewer.team ? dist(viewer, o) <= 1 : false) ||
     dist(viewer, o) <= 3 ||
     isVisibleToTeam(visionGrid[sideOf(viewer.team as Team)], staticFog, o)
   const visibleEnemyHeroes = (side: DraftSide) =>
@@ -1940,6 +1956,18 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
   const wardTarget = (side: DraftSide): WardSpot | undefined => {
     const team = SIDE_TEAM[side]
+    // Defensive vision (spec/10 layer 4): an ally died recently → ward the
+    // nearest open spot within 12 tiles of the death first.
+    const death = lastDeathAt[side]
+    if (death && clock - death.t <= DEFENSIVE_WARD_WINDOW) {
+      const near = spots
+        .filter(
+          (sp) =>
+            dist(sp.at, death) <= 12 && !wards.some((w) => w.side === side && w.spotId === sp.id),
+        )
+        .toSorted((a, b) => dist(a.at, death) - dist(b.at, death) || (a.id < b.id ? -1 : 1))[0]
+      if (near) return near
+    }
     for (const zone of tac[side].vision) {
       if (zone === "enemy-jungle" && phase === "laning") continue
       const spot = spots.find(
@@ -2254,6 +2282,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     force: 0,
     eul: 0,
     manta: 0,
+    glimmer: 0,
     tango: 0,
   }
   let fizzled = 0
@@ -2319,7 +2348,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const fightStart = near7 > 0 && clock - h.lastEnemyNear >= 10
     if (near7 > 0) h.lastEnemyNear = clock
     const readySet = new Set(
-      (["bkb", "blink", "force", "eul", "manta"] as const).filter((id) => ready(h, id)),
+      (["bkb", "blink", "force", "eul", "manta", "glimmer"] as const).filter((id) => ready(h, id)),
     )
     if (readySet.size === 0) return false
     const use = defensiveTrigger({
@@ -2375,9 +2404,24 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       return true
     }
     // Support save with Force Staff: push the endangered ally away from its attacker.
+    if (h.intent === "save" && readySet.has("glimmer") && h.saveId) {
+      const ally = heroes.find((x) => x.id === h.saveId)
+      // Glimmer works on stunned allies (Force can't move them out of a lock).
+      if (ally?.alive && dist(ally, b) <= 7 && ally.st.glimmer <= 0) {
+        ally.st.glimmer = GLIMMER_DURATION
+        for (const o of bodies) if (o.target === ally && o.team !== ally.team) o.target = undefined
+        useActive(
+          b,
+          "glimmer",
+          lookupItem("glimmer").active!.cooldown,
+          `glimmers ${heroLabel(ally)}`,
+        )
+        return true
+      }
+    }
     if (h.intent === "save" && readySet.has("force") && h.saveId) {
       const ally = heroes.find((x) => x.id === h.saveId)
-      if (ally?.alive && dist(ally, b) <= 6) {
+      if (ally?.alive && dist(ally, b) <= 6 && ally.st.stun <= 0) {
         const foe = brain
           .known(h.side, 0)
           .filter((e) => e.visible)
@@ -2687,6 +2731,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     s.stun = Math.max(0, s.stun - dt)
     s.immune = Math.max(0, s.immune - dt)
     s.cyclone = Math.max(0, s.cyclone - dt)
+    s.glimmer = Math.max(0, s.glimmer - dt)
+    b.disabledFor = Math.max(s.stun, s.root)
     s.root = Math.max(0, s.root - dt)
     s.slowT = Math.max(0, s.slowT - dt)
     if (s.slowT === 0) s.slow = 0

@@ -294,6 +294,17 @@ export const ITEMS: readonly Item[] = [
     active: { cooldown: 30, trigger: "selfCleanse" },
   },
   {
+    id: "glimmer",
+    name: "Glimmer Cape",
+    cost: 1950,
+    tier: 4,
+    components: ["nullstone"],
+    tags: ["save"],
+    hp: 60,
+    magicResist: 0.1,
+    active: { cooldown: 14, trigger: "allySave" },
+  },
+  {
     id: "tango",
     name: "Tango",
     cost: 90,

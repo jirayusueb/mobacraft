@@ -16,7 +16,6 @@
  *   setLanes(lanes, skill) · laneGoldMul(key, t) · zonedOut(key, t) · laneAdvantage(key)
  *   moveMul(key, intent, goalDist) · aura(key)
  *   observe(key, t, enemyNear, items)     fight-start detection → BKB
- *   blinkReach(key, t, items)             Blink Dagger engage range
  *   combo(init, follow, t, followHasDisable)
  *   purchase(view) · onDeath(key, items)
  *   events()                              drained feed lines
@@ -129,7 +128,6 @@ export const createHeroSystems = (o: HeroSystemsOptions) => {
   const immuneUntil = new Map<string, number>()
   const bkbReady = new Map<string, number>()
   const lastEnemyNear = new Map<string, number>()
-  const blinkReady = new Map<string, number>()
   const mispos = new Map<string, { until: number; nextRoll: number }>()
   const comboPairCd = new Map<string, number>()
   const ruleLogged = new Set<string>()
@@ -279,13 +277,6 @@ export const createHeroSystems = (o: HeroSystemsOptions) => {
     }
   }
 
-  /** Engage range from Blink Dagger: 10 tiles once per 12 s. Consumes the charge. */
-  const blinkReach = (k: string, t: number, items: readonly string[], consume: boolean) => {
-    if (!items.includes("blink") || (blinkReady.get(k) ?? 0) > t) return 0
-    if (consume) blinkReady.set(k, t + 12)
-    return 10
-  }
-
   const castDelay = (k: string) => TIER_EFFECT[tier(k)].castDelay
 
   /** Lane-goal shift (tiles toward the enemy) while mispositioned; rolled every 10 s. */
@@ -402,7 +393,6 @@ export const createHeroSystems = (o: HeroSystemsOptions) => {
     disableBlocked,
     isImmune,
     observe,
-    blinkReach,
     castDelay,
     mispositionShift,
     setLanes,

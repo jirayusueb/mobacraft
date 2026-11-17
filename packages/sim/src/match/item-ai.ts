@@ -75,6 +75,7 @@ export const COUNTER_ITEMS: readonly string[] = [
   "force",
   "eul",
   "manta",
+  "glimmer",
   "nullstone",
   "pipe",
 ]
@@ -84,7 +85,7 @@ const ROLE_WEIGHT: Readonly<Record<Role, Partial<Record<string, number>>>> = {
   mid: { mkb: 0.3, bkb: 0.8, eul: 1, force: 0.4, nullstone: 0.6, pipe: 0.1 },
   offlane: { mkb: 0.2, bkb: 0.7, eul: 0.3, force: 0.4, nullstone: 0.8, pipe: 1 },
   jungle: { mkb: 0.6, bkb: 0.8, eul: 0.3, force: 0.3, manta: 0.5, nullstone: 0.6, pipe: 0.4 },
-  support: { mkb: 0, bkb: 0.2, eul: 0.6, force: 1, nullstone: 0.5, pipe: 0.6 },
+  support: { mkb: 0, bkb: 0.2, eul: 0.6, force: 1, glimmer: 0.9, nullstone: 0.5, pipe: 0.6 },
 }
 
 /** Threat-response term for one candidate item (spec/10 layer 3 examples). */
@@ -96,6 +97,7 @@ export const threatScore = (itemId: string, role: Role, th: ThreatProfile): numb
     case "bkb":
       return w * (th.disablers * 25 + th.magicShare * 60)
     case "force":
+    case "glimmer":
     case "eul":
       return w * th.divers * 45
     case "manta":

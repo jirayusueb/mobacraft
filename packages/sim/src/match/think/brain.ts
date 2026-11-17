@@ -62,6 +62,8 @@ export interface BrainBody {
   readonly damage: number
   readonly attackTime: number
   readonly hero?: BrainHeroState
+  /** Stun/root seconds left (spec/10 S5b: stunned allies are save targets). */
+  readonly disabledFor?: number
 }
 
 export interface BrainCtx<B extends BrainBody> {
@@ -155,6 +157,9 @@ export const defensivePurchase = (
   if (!want || bookIndex !== want.at || owned.includes(want.id)) return null
   return want.id
 }
+
+/** Items that can pull an ally out of danger (spec/10 S5b). */
+export const SAVE_ITEMS = ["force", "glimmer"] as const
 
 export const createBrain = <B extends BrainBody>(ctx: BrainCtx<B>) => {
   const boards: Record<DraftSide, Blackboard> = { blue: new Blackboard(), red: new Blackboard() }
@@ -331,19 +336,22 @@ export const createBrain = <B extends BrainBody>(ctx: BrainCtx<B>) => {
     const theirPower = nearFoes.reduce((s, e) => s + e.hpFrac * (1 + e.level * 0.15), 0)
     const engage = nearFoes.length > 0 && myPower >= theirPower * ratio
 
-    // Save (supports): an ally core < 25 % hp with a visible enemy within 8.
+    // Save (supports): an ally core < 25 % hp — or < 35 % / stunned when this
+    // support carries a save item (spec/10 S5b) — with a visible enemy within 8.
     const canSave =
       h.role === "support" ||
       h.def.skill.target.kind === "ally" ||
       h.def.ultimate.target.kind === "ally" ||
       h.def.ultimate.target.kind === "ally-aoe"
     const cores = allies.filter((a) => a.hero!.role === "carry" || a.hero!.role === "mid")
+    const hasSaveItem = SAVE_ITEMS.some((id) => h.items.includes(id))
     const saveTarget = canSave
       ? (cores.length ? cores : allies)
           .filter(
             (a) =>
               a !== b &&
-              a.hp / a.maxHp < 0.25 &&
+              (a.hp / a.maxHp < 0.25 ||
+                (hasSaveItem && (a.hp / a.maxHp < 0.35 || (a.disabledFor ?? 0) > 0.5))) &&
               visibleNear({ x: a.x, z: a.z }, 8).length > 0 &&
               d2(a, me) <= 20 &&
               bb.isFree(`save:${a.id}`, b.id, t),

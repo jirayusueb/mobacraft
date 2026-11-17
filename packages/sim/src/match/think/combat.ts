@@ -16,10 +16,12 @@ export const BLINK_LANDING = 1.5
 export const FORCE_DISTANCE = 6
 export const EUL_DURATION = 2.5
 export const BKB_DURATION = 6
+/** Glimmer Cape invisibility (spec/10 S5b). */
+export const GLIMMER_DURATION = 5
 /** Chain-stun slack: hold a disable while the current one has more than travel + this left. */
 export const CHAIN_SLACK = 0.3
 
-export type ActiveId = "bkb" | "blink" | "force" | "eul" | "manta"
+export type ActiveId = "bkb" | "blink" | "force" | "eul" | "manta" | "glimmer"
 
 export interface ActiveView {
   readonly hpPct: number
