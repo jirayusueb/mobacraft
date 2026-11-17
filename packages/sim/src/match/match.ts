@@ -647,6 +647,19 @@ const netWorthOf = (h: HeroState) => {
   )
 }
 const sideOf = (team: Team): DraftSide => TEAM_SIDE[team]
+/**
+ * `arr.filter(keep).toSorted(cmp)[0]` without the copies: the first kept element no other
+ * kept element sorts strictly before (toSorted is stable, so that is the same element).
+ */
+const minBy = <T>(
+  arr: readonly T[],
+  keep: (x: T) => boolean,
+  cmp: (a: T, b: T) => number,
+): T | undefined => {
+  let best: T | undefined
+  for (const x of arr) if (keep(x) && (best === undefined || cmp(x, best) < 0)) best = x
+  return best
+}
 const timeLeft = (x: { t: number }) => x.t > 0
 /** In-place `arr = arr.filter(keep)` (same order) — status lists are ticked every 0.1 s. */
 const compact = <T>(arr: T[], keep: (x: T) => boolean) => {
@@ -1946,22 +1959,21 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   // --- AI --------------------------------------------------------------------------
   const laneFront = (team: Team, laneId: LaneId) => {
     const lane = lanes.get(laneId)!
-    const mine = bodies.filter(
-      (b) => b.alive && b.type === "creep" && b.team === team && b.lane === laneId,
-    )
-    if (mine.length) {
-      // `s` is distance travelled from the creep's own base for both teams.
-      const s = Math.max(...mine.map((c) => c.s ?? 0))
+    // `s` is distance travelled from the creep's own base for both teams (max over own creeps).
+    let s = -Infinity
+    for (const c of bodies)
+      if (c.alive && c.type === "creep" && c.team === team && c.lane === laneId)
+        s = Math.max(s, c.s ?? 0)
+    if (s !== -Infinity) {
       const p = lane.at(team === "radiant" ? s - 1.5 : lane.length - s + 1.5)
       return { x: p.x, z: p.z }
     }
     // No creeps: hold near own outermost standing tower.
-    const towers = structList
-      .filter(
-        (t) => t.alive && t.type === "tower" && t.team === team && t.structure!.lane === laneId,
-      )
-      .toSorted((a, b) => (a.structure!.tier ?? 1) - (b.structure!.tier ?? 1))
-    const t = towers[0]
+    const t = minBy(
+      structList,
+      (t) => t.alive && t.type === "tower" && t.team === team && t.structure!.lane === laneId,
+      (a, b) => (a.structure!.tier ?? 1) - (b.structure!.tier ?? 1),
+    )
     if (t) return { x: t.x, z: t.z }
     const f = fountain(team)
     return f
@@ -1978,11 +1990,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (!mine.length) return null
     const cx = mine.reduce((s, h) => s + h.x, 0) / mine.length
     const cz = mine.reduce((s, h) => s + h.z, 0) / mine.length
-    const targets = structList.filter((t) => t.alive && t.team !== team && vulnerable(t))
     return (
-      targets.toSorted(
+      minBy(
+        structList,
+        (t) => t.alive && t.team !== team && vulnerable(t),
         (a, b) => Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz),
-      )[0] ?? null
+      ) ?? null
     )
   }
 
@@ -2008,13 +2021,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     )
 
   const coreOf = (side: DraftSide) =>
-    heroes
-      .filter((x) => x.hero!.side === side && x.alive && x.hero!.role !== "support")
-      .toSorted(
-        (a, b) =>
-          (b.hero!.role === "carry" ? 1 : 0) - (a.hero!.role === "carry" ? 1 : 0) ||
-          netWorthOf(b.hero!) - netWorthOf(a.hero!),
-      )[0]
+    minBy(
+      heroes,
+      (x) => x.hero!.side === side && x.alive && x.hero!.role !== "support",
+      (a, b) =>
+        (b.hero!.role === "carry" ? 1 : 0) - (a.hero!.role === "carry" ? 1 : 0) ||
+        netWorthOf(b.hero!) - netWorthOf(a.hero!),
+    )
   const warderOf = (side: DraftSide) => {
     const alive = heroes.filter((x) => x.hero!.side === side && x.alive)
     return (
@@ -2415,10 +2428,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     b.velMag = 0
   }
   const closestKnownEnemy = (b: Body) =>
-    brain
-      .known(b.hero!.side, 0)
-      .filter((e) => e.visible)
-      .toSorted((x, y) => dist(x.pos, b) - dist(y.pos, b) || (x.id < y.id ? -1 : 1))[0]
+    minBy(
+      brain.known(b.hero!.side, 0),
+      (e) => e.visible,
+      (x, y) => dist(x.pos, b) - dist(y.pos, b) || (x.id < y.id ? -1 : 1),
+    )
   /** Distance to the nearest lit enemy spell projectile heading for this hero. */
   const incomingProjectile = (b: Body) => {
     const side = b.hero!.side
