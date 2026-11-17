@@ -296,7 +296,18 @@ export const rollNeutralDrop = (
 }
 
 /** Count of items across zones (for full-inventory checks). */
-export const countItems = (inv: HeroInventory): number => allItems(inv).length
+/** Same count as `allItems(inv).length`, without building the list. */
+export const countItems = (inv: HeroInventory): number => {
+  let n = inv.neutral !== null ? 1 : 0
+  for (const id of inv.main) if (id !== null) n++
+  for (const id of inv.backpack) if (id !== null) n++
+  for (const id of inv.stash) if (id !== null) n++
+  return n
+}
+
+/** Same as `allItems(inv).includes(id)`, without building the list. */
+export const ownsItem = (inv: HeroInventory, id: string): boolean =>
+  inv.neutral === id || inv.main.includes(id) || inv.backpack.includes(id) || inv.stash.includes(id)
 
 // Shop items never appear in neutral pools and vice versa (test-enforced).
 export const SHOP_IDS: readonly string[] = ITEMS.map((i) => i.id)

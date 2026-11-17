@@ -50,6 +50,7 @@ import {
   addItem,
   addToStash,
   allItems,
+  ownsItem,
   countItems,
   effectiveItems,
   emptyInventory,
@@ -2100,9 +2101,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           : enemyIds.filter(MAGIC_HEAVY).length / Math.max(1, enemyIds.length),
       losingBase: lostT3[h.side],
       netWorthDeficit: sideSum(enemy, netWorthOf) - sideSum(h.side, netWorthOf),
-      teamHasPipe: heroes.some(
-        (x) => x.hero!.side === h.side && allItems(x.hero!.inv).includes("pipe"),
-      ),
+      teamHasPipe: heroes.some((x) => x.hero!.side === h.side && ownsItem(x.hero!.inv, "pipe")),
       followsRules: true,
       enabledRules: ALL_RULES,
     }
