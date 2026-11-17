@@ -4,6 +4,8 @@ import type { CommsEntry } from "@mobacraft/sim"
 import {
   AnnouncerTracker,
   commsText,
+  inventorySummary,
+  inventoryZones,
   leadMarkers,
   leadSeries,
   noCallerAlive,
@@ -223,5 +225,49 @@ describe("roshan HUD", () => {
     expect(roshanUnderAttack(0.995)).toBeFalse()
     expect(roshanUnderAttack(0.42)).toBeTrue()
     expect(roshanUnderAttack(null)).toBeFalse()
+  })
+})
+
+describe("inventory zones (spec/10)", () => {
+  test("older snapshots without zone fields read as empty", () => {
+    const z = inventoryZones(hero({ items: ["boots"] }))
+    expect(z).toEqual({
+      backpack: [],
+      neutral: null,
+      stash: [],
+      inTransit: [],
+      buffs: [],
+      tango: 0,
+      any: false,
+    })
+    expect(inventorySummary(hero({ items: ["boots"] }))).toBe("items: boots")
+  })
+
+  test("every zone is surfaced, empties dropped", () => {
+    const h = hero({
+      items: ["boots", "blade"],
+      main: ["boots", null, "blade", "blink", null, null],
+      mainMute: [0, 0, 0, 4.2, 0, 0],
+      backpack: ["steel", null, null],
+      neutral: "n-trinket",
+      stash: [null, "orb", null, null, null, null],
+      inTransit: ["plating"],
+      buffs: ["moon-shard"],
+      tango: 2,
+    })
+    const z = inventoryZones(h)
+    expect(z.backpack).toEqual(["steel"])
+    expect(z.stash).toEqual(["orb"])
+    expect(z.inTransit).toEqual(["plating"])
+    expect(z.any).toBeTrue()
+    expect(inventorySummary(h)).toBe(
+      "items: boots, blade, blink; muted: blink; neutral: n-trinket; backpack: steel; " +
+        "stash: orb; on courier: plating; buffs: moon-shard; 2 tango",
+    )
+  })
+
+  test("names come from the supplied resolver", () => {
+    const h = hero({ items: ["boots"], main: ["boots", null, null, null, null, null] })
+    expect(inventorySummary(h, (id) => id.toUpperCase())).toBe("items: BOOTS")
   })
 })

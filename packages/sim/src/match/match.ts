@@ -413,10 +413,21 @@ export interface HeroLine {
   readonly gold: number
   readonly heroDamage: number
   readonly healing: number
+  /** Effective items (main + neutral, unmuted) — what grants stats right now. */
   readonly items: readonly string[]
+  /** The 6 main slots in order (null = empty), muted items included (spec/10). */
+  readonly main: readonly (string | null)[]
+  /** Seconds of backpack-swap mute left per main slot (0 = live). */
+  readonly mainMute: readonly number[]
   readonly backpack: readonly (string | null)[]
   readonly neutral: string | null
   readonly stash: readonly (string | null)[]
+  /** Items on the team courier addressed to this hero. */
+  readonly inTransit: readonly string[]
+  /** Slot-free permanent buffs consumed (Aghanim's Blessing, Moon Shard). */
+  readonly buffs: readonly string[]
+  /** Tango charges left. */
+  readonly tango: number
   readonly intent: Intent
   readonly aegis: boolean
   readonly netWorth: number
@@ -3894,9 +3905,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       heroDamage: Math.round(h.heroDamage),
       healing: Math.round(h.healing),
       items: [...h.items],
+      main: [...h.inv.main],
+      mainMute: h.inv.mainMute.map((u) => Math.max(0, Math.round((u - clock) * 10) / 10)),
       backpack: [...h.inv.backpack],
       neutral: h.inv.neutral,
       stash: [...h.inv.stash],
+      inTransit: [...h.inTransit],
+      buffs: [...h.consumed].toSorted(),
+      tango: h.tango,
       intent: h.intent,
       aegis: h.aegis,
       netWorth: netWorthOf(h),

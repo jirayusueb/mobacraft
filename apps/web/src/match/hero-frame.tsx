@@ -2,9 +2,9 @@ import { MAX_LEVEL, RESPAWN_BASE, RESPAWN_PER_LEVEL } from "@mobacraft/sim"
 /** Hero frames — one compact card per hero down each side of the screen. */
 import { type HeroLine, MAX_ITEMS } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
-import { Coins, Crown, Skull } from "lucide-react"
+import { Bird, Coins, Crown, Package2, Skull } from "lucide-react"
 import { INTENT_LABEL } from "../strings.ts"
-import { goldK } from "./hud-data.ts"
+import { goldK, inventorySummary, inventoryZones } from "./hud-data.ts"
 import { ItemSlot, itemName } from "./item-icon.tsx"
 import { HeroGem } from "./ui.tsx"
 
@@ -95,8 +95,11 @@ const HeroFrame = ({
 }) => {
   const dead = !h.alive
   const ult = h.level >= ULT_LEVEL
-  const slots = Array.from({ length: MAX_ITEMS }, (_, i) => h.items[i])
-  const inv = h.items.map(itemName).join(", ")
+  // Main slots in their real positions (muted ones included); older snapshots
+  // without `main` fall back to the effective list.
+  const slots = Array.from({ length: MAX_ITEMS }, (_, i) => (h.main ? h.main[i] : h.items[i]))
+  const zones = inventoryZones(h)
+  const inv = inventorySummary(h, itemName)
   const respawnFrac = respawnTotal > 0 ? Math.min(1, h.respawnIn / respawnTotal) : 0
   return (
     <button
@@ -117,7 +120,7 @@ const HeroFrame = ({
         h.igl ? "in-game leader" : "",
         h.following === false ? "freelancing, ignoring the current call" : "",
         `${goldK(h.netWorth ?? h.gold)} net worth`,
-        inv ? `items: ${inv}` : "no items",
+        inv,
       ]
         .filter(Boolean)
         .join("; ")}
@@ -180,13 +183,56 @@ const HeroFrame = ({
         <span className="mt-1 flex items-center gap-[3px]" aria-hidden>
           {slots.map((id, i) => (
             // oxlint-disable-next-line react/no-array-index-key -- inventory slots are positional
-            <ItemSlot key={i} id={id} size={16} />
+            <ItemSlot key={i} id={id} size={16} muteLeft={h.mainMute?.[i] ?? 0} />
           ))}
+          {zones.neutral ? (
+            <span className="ml-0.5 border-l border-white/10 pl-1">
+              <ItemSlot id={zones.neutral} size={14} />
+            </span>
+          ) : null}
           <span className="ml-auto flex items-center gap-0.5 text-[10px] font-semibold tabular-nums text-amber-200/90">
             <Coins className="size-2.5" />
             {goldK(h.netWorth ?? h.gold)}
           </span>
         </span>
+        {zones.any ? (
+          <span className="mt-0.5 flex items-center gap-[3px]" aria-hidden>
+            {zones.backpack.map((id, i) => (
+              // oxlint-disable-next-line react/no-array-index-key -- backpack slots are positional
+              <ItemSlot key={`b${i}`} id={id} size={11} dim />
+            ))}
+            {zones.buffs.map((id) => (
+              <ItemSlot key={id} id={id} size={11} />
+            ))}
+            {zones.tango > 0 ? (
+              <span className="flex items-center gap-px text-[8.5px] font-semibold tabular-nums text-green-300/80">
+                <ItemSlot id="tango" size={11} />
+                {zones.tango}
+              </span>
+            ) : null}
+            {zones.stash.length > 0 ? (
+              <span
+                className="ml-auto flex items-center gap-0.5 text-[8.5px] text-white/55"
+                title={`Stash: ${zones.stash.map(itemName).join(", ")}`}
+              >
+                <Package2 className="size-2.5" />
+                {zones.stash.length}
+              </span>
+            ) : null}
+            {zones.inTransit.length > 0 ? (
+              <span
+                className={cn(
+                  "flex items-center gap-0.5 text-[8.5px] text-cyan-200/90",
+                  zones.stash.length === 0 && "ml-auto",
+                )}
+                title={`On the courier: ${zones.inTransit.map(itemName).join(", ")}`}
+              >
+                <Bird className="size-2.5" />
+                {zones.inTransit.length}
+              </span>
+            ) : null}
+          </span>
+        ) : null}
       </span>
       {/* intent chip, pinned top-right over the frame edge */}
       {!dead ? (

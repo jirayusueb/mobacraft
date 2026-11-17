@@ -452,3 +452,59 @@ export const roshanHp = <U extends { kind: string; hp?: number }>(
 
 /** True while the pit is being fought (alive and below ~full health). */
 export const roshanUnderAttack = (hp: number | null): boolean => hp !== null && hp < 0.995
+
+// --- inventory zones (spec/10) -------------------------------------------------------
+
+const filled = (xs: readonly (string | null)[] | undefined): string[] =>
+  (xs ?? []).filter((x): x is string => x !== null)
+
+export interface InventoryZones {
+  /** Backpack items (inert). */
+  readonly backpack: readonly string[]
+  readonly neutral: string | null
+  readonly stash: readonly string[]
+  readonly inTransit: readonly string[]
+  readonly buffs: readonly string[]
+  readonly tango: number
+  /** Anything beyond the six main slots worth a second row. */
+  readonly any: boolean
+}
+
+/** Secondary inventory zones for a hero frame; tolerant of older snapshots. */
+export const inventoryZones = (h: HeroLine): InventoryZones => {
+  const backpack = filled(h.backpack)
+  const stash = filled(h.stash)
+  const inTransit = [...(h.inTransit ?? [])]
+  const buffs = [...(h.buffs ?? [])]
+  const tango = h.tango ?? 0
+  return {
+    backpack,
+    neutral: h.neutral ?? null,
+    stash,
+    inTransit,
+    buffs,
+    tango,
+    any: backpack.length + stash.length + inTransit.length + buffs.length > 0 || tango > 0,
+  }
+}
+
+/** Screen-reader inventory text, zone by zone (names via `nameOf`). */
+export const inventorySummary = (
+  h: HeroLine,
+  nameOf: (id: string) => string = (id) => id,
+): string => {
+  const z = inventoryZones(h)
+  const main = filled(h.main ?? h.items)
+  const muted = (h.main ?? []).filter((id, i) => id !== null && (h.mainMute?.[i] ?? 0) > 0)
+  const parts = [
+    main.length ? `items: ${main.map(nameOf).join(", ")}` : "no items",
+    muted.length ? `muted: ${muted.map((id) => nameOf(id!)).join(", ")}` : "",
+    z.neutral ? `neutral: ${nameOf(z.neutral)}` : "",
+    z.backpack.length ? `backpack: ${z.backpack.map(nameOf).join(", ")}` : "",
+    z.stash.length ? `stash: ${z.stash.map(nameOf).join(", ")}` : "",
+    z.inTransit.length ? `on courier: ${z.inTransit.map(nameOf).join(", ")}` : "",
+    z.buffs.length ? `buffs: ${z.buffs.map(nameOf).join(", ")}` : "",
+    z.tango ? `${z.tango} tango` : "",
+  ]
+  return parts.filter(Boolean).join("; ")
+}

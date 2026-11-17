@@ -78,6 +78,13 @@ export const WardMap = ({
   const mine = snap.heroes.filter((h) => h.side === you)
   const pos = new Map(units.map((u) => [u.id, u]))
   const stock = snap.wardStock[you]
+  // Own courier only (spec/10 S3): drawn while it is out of the fountain or loaded.
+  const courier = (snap.couriers ?? []).find((c) => c.side === you)
+  const courierOut =
+    courier && (courier.cargo.length > 0 || courier.targetHero !== null) ? courier : null
+  const courierFor = courierOut
+    ? snap.heroes.find((h) => h.id === courierOut.targetHero)?.playerName
+    : undefined
   const ownTeam = you === "blue" ? "radiant" : "dire"
   // Your team is drawn in "radiant" tone (ally) like the rest of the HUD.
   const dot = (h: HeroLine) => {
@@ -99,7 +106,7 @@ export const WardMap = ({
   }
   return (
     <section
-      aria-label={`Mini map: ${wards.length} of your wards placed, ${stock.charges} in stock. Map control ${pct(snap.control[you])} versus ${pct(snap.control[them])}.`}
+      aria-label={`Mini map: ${wards.length} of your wards placed, ${stock.charges} in stock. Map control ${pct(snap.control[you])} versus ${pct(snap.control[them])}.${courierOut ? ` Courier out with ${courierOut.cargo.length} items.` : ""}`}
       className={cn("pointer-events-auto rounded-2xl", glass, "flex flex-col gap-1 p-1.5")}
     >
       <div
@@ -167,6 +174,19 @@ export const WardMap = ({
             </g>
           ))}
           {mine.map(dot)}
+          {courierOut ? (
+            <g>
+              <title>
+                {`Courier · ${courierOut.cargo.length} item${courierOut.cargo.length === 1 ? "" : "s"}${courierFor ? ` for ${courierFor}` : ""}`}
+              </title>
+              <path
+                d={`M${courierOut.x},${courierOut.z - S / 45}L${courierOut.x + S / 50},${courierOut.z + S / 70}L${courierOut.x - S / 50},${courierOut.z + S / 70}Z`}
+                className="fill-cyan-200"
+                stroke="black"
+                strokeWidth={S / 260}
+              />
+            </g>
+          ) : null}
         </svg>
       </div>
       <div className="flex items-center gap-2 px-0.5 text-[10px] tabular-nums">
