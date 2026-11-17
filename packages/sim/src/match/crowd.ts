@@ -391,6 +391,25 @@ export interface CrowdWorld<M extends Mover> {
 
 const scratch: Mover[] = []
 const agents: CrowdAgent[] = []
+// Pools for crowdStep's ORCA pass (one tick allocated ~5 objects per mover per tick).
+// orcaVelocity only reads its inputs during the call and never retains them.
+interface MutAgent {
+  x: number
+  z: number
+  vx: number
+  vz: number
+  radius: number
+  priority: number
+}
+const newAgent = (): MutAgent => ({ x: 0, z: 0, vx: 0, vz: 0, radius: 0, priority: 0 })
+const agentPool: MutAgent[] = []
+const selfAgent = newAgent()
+interface Cand {
+  o: Mover
+  d: number
+}
+const candPool: Cand[] = []
+const cands: Cand[] = []
 
 /**
  * One crowd tick (review §8 determinism): yield requests → ORCA for every mover from
@@ -456,9 +475,15 @@ export const crowdStep = <M extends Mover>(
     }
     near.length = 0
     world.neighbors(m, NEIGHBOR_RADIUS, near)
-    const self = { x: m.x, z: m.z, vx: m.vx, vz: m.vz, radius: m.radius, priority: pri }
+    const self = selfAgent
+    self.x = m.x
+    self.z = m.z
+    self.vx = m.vx
+    self.vz = m.vz
+    self.radius = m.radius
+    self.priority = pri
     // Collect, cull and sort by (distance, id); cap at MAX_NEIGHBORS.
-    const cands: { o: M; d: number }[] = []
+    cands.length = 0
     const mySpeed = Math.hypot(m.pvx, m.pvz) + Math.hypot(m.vx, m.vz)
     for (const o of near) {
       if (o === m) continue
@@ -466,7 +491,10 @@ export const crowdStep = <M extends Mover>(
       // Can these two meet within the horizon at all?
       const reachT = (mySpeed + Math.hypot(o.vx, o.vz)) * ORCA_TAU + m.radius + o.radius
       if (d > NEIGHBOR_RADIUS || d > reachT) continue
-      cands.push({ o, d })
+      const c = candPool[cands.length] ?? (candPool[cands.length] = { o, d })
+      c.o = o
+      c.d = d
+      cands.push(c)
     }
     if (cands.length === 0) {
       nvx[i] = m.pvx
@@ -477,7 +505,14 @@ export const crowdStep = <M extends Mover>(
     agents.length = 0
     for (let k = 0; k < cands.length && k < MAX_NEIGHBORS; k++) {
       const o = cands[k]!.o
-      agents.push({ x: o.x, z: o.z, vx: o.vx, vz: o.vz, radius: o.radius, priority: priorityOf(o) })
+      const ag = agentPool[k] ?? (agentPool[k] = newAgent())
+      ag.x = o.x
+      ag.z = o.z
+      ag.vx = o.vx
+      ag.vz = o.vz
+      ag.radius = o.radius
+      ag.priority = priorityOf(o)
+      agents.push(ag)
     }
     const v = orcaVelocity(self, m.pvx, m.pvz, m.maxSpeed, agents, dt)
     nvx[i] = v.x
