@@ -1,11 +1,21 @@
 /** Top-centre scoreboard: crests, kills, clock, tower pips, gold lead, Roshan. */
-import type { DraftSide, DraftState, MatchSnapshot } from "@mobacraft/sim"
+import type { DraftSide, DraftState, MatchSnapshot, Unit } from "@mobacraft/sim"
 import { Panel, cn } from "@mobacraft/ui"
 import { Skull, TrendingUp } from "lucide-react"
-import { ROSHAN_RESPAWN_APPROX, goldK, otherSide, roshanDownAt } from "./hud-data.ts"
+import {
+  ROSHAN_RESPAWN_APPROX,
+  goldK,
+  otherSide,
+  roshanDownAt,
+  roshanHp,
+  roshanUnderAttack,
+} from "./hud-data.ts"
 import { TeamCrest, clockText } from "./ui.tsx"
 
 const TOWERS_PER_SIDE = 11
+
+/** Stable default for `units` (array literal defaults re-render forever). */
+const EMPTY_UNITS: readonly Unit[] = []
 
 /** 11 pips; `down` of them filled = enemy towers this side has destroyed. */
 const TowerPips = ({ down, tone }: { down: number; tone: "ally" | "enemy" }) => (
@@ -27,10 +37,13 @@ export const Scoreboard = ({
   snap,
   draft,
   you,
+  units = EMPTY_UNITS,
 }: {
   snap: MatchSnapshot
   draft: DraftState
   you: DraftSide
+  /** Live unit list — drives the "Roshan 64%" under-attack readout. */
+  units?: readonly Unit[]
 }) => {
   const them = otherSide(you)
   const yourTeam = you === "blue" ? draft.blue : draft.red
@@ -38,6 +51,8 @@ export const Scoreboard = ({
   const lead = snap.gold[you] - snap.gold[them]
   const leader = Math.abs(lead) < 100 ? null : lead > 0 ? you : them
   const downAt = roshanDownAt(snap.feed)
+  const hp = roshanHp(units)
+  const fighting = roshanUnderAttack(hp)
   const back = downAt === null ? 0 : Math.max(0, downAt + ROSHAN_RESPAWN_APPROX - snap.time)
 
   return (
@@ -119,11 +134,18 @@ export const Scoreboard = ({
         <span
           className={cn(
             "flex items-center gap-1.5",
-            snap.roshanAlive ? "text-violet-300" : "text-white/40",
+            fighting ? "text-amber-200" : snap.roshanAlive ? "text-violet-300" : "text-white/40",
           )}
+          aria-live="polite"
         >
           <Skull className="size-3.5" aria-hidden />
-          {snap.roshanAlive ? "Roshan up" : back > 0 ? `Roshan ~${clockText(back)}` : "Roshan due"}
+          {fighting
+            ? `Roshan ${Math.round((hp ?? 0) * 100)}%`
+            : snap.roshanAlive
+              ? "Roshan up"
+              : back > 0
+                ? `Roshan ~${clockText(back)}`
+                : "Roshan due"}
         </span>
       </Panel>
     </div>

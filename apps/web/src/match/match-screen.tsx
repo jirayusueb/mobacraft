@@ -130,10 +130,22 @@ export const MatchScreen = ({
     return () => clearTimeout(tid)
   }, [snap.winner, match, dispatch])
 
+  const [callNotice, setCallNotice] = useState<string | null>(null)
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Issue a call; a rejected one (cooldown) surfaces as a transient notice. */
   const doCall = useCallback(
     (c: CoachCall) => {
-      match.call(you, c)
-      setSnap(match.snapshot())
+      const ok = match.call(you, c)
+      const s = match.snapshot()
+      if (!ok && !s.winner) {
+        const cd = Math.ceil(s.calls[you].cooldown)
+        setCallNotice(cd > 0 ? `Call on cooldown — ${cd}s` : "Call unavailable")
+        if (noticeTimer.current) clearTimeout(noticeTimer.current)
+        noticeTimer.current = setTimeout(() => setCallNotice(null), 1600)
+      } else {
+        setCallNotice(null)
+      }
+      setSnap(s)
     },
     [match, you],
   )
@@ -144,7 +156,7 @@ export const MatchScreen = ({
       if (e.target !== document.body) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
       const c = CALLS.find((x) => x.key === e.key)
-      if (c) match.call(you, c.id)
+      if (c) doCall(c.id)
       else if (e.key === "g" || e.key === "G") setEconomyOpen((o) => !o)
       else if (e.key === "t" || e.key === "T") setTacticsOpen((o) => !o)
       else if (e.key === "`") setDebugOn((o) => !o)
@@ -159,14 +171,24 @@ export const MatchScreen = ({
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [match, you, view])
+  }, [match, view, doCall])
 
   const mine = snap.heroes.filter((h) => h.side === you)
   const theirs = snap.heroes.filter((h) => h.side === them)
 
   return (
     <div className="pointer-events-none absolute inset-0 text-white">
-      <Scoreboard snap={snap} draft={draft} you={you} />
+      <Scoreboard snap={snap} draft={draft} you={you} units={units} />
+      {callNotice ? (
+        <output
+          className={cn(
+            "absolute top-[4.6rem] left-1/2 z-20 -translate-x-1/2 rounded-sm border border-amber-300/50 bg-black/70 px-2 py-0.5 font-mono text-[11px] tracking-wider text-amber-200",
+          )}
+          aria-live="polite"
+        >
+          {callNotice}
+        </output>
+      ) : null}
       <PhaseChip snap={snap} you={you} />
       {debugOn ? (
         <output className="absolute top-[4.6rem] left-1/2 -translate-x-1/2 rounded-sm border border-amber-300/50 bg-black/60 px-2 py-0.5 font-mono text-[11px] tracking-wider text-amber-200">
