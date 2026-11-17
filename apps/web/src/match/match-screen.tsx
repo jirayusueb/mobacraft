@@ -62,6 +62,12 @@ export const MatchScreen = ({
   const [banners, setBanners] = useState<readonly Banner[]>([])
   const [economyOpen, setEconomyOpen] = useState(false)
   const [tacticsOpen, setTacticsOpen] = useState(false)
+  /** Crowd/combat debug overlay (spec/13 §4), toggled with backquote. */
+  const [debugOn, setDebugOn] = useState(false)
+  useEffect(() => {
+    view.setDebugOverlay(debugOn)
+    return () => view.setDebugOverlay(false)
+  }, [view, debugOn])
   const announcer = useRef(new AnnouncerTracker())
 
   /** Coach-perspective fog bytes (spec/08 §5), read by the 20 Hz fog layer. */
@@ -132,7 +138,7 @@ export const MatchScreen = ({
     [match, you],
   )
 
-  // Keyboard: 1-5 calls, Space pause, [ ] speed, G economy, T live tactics.
+  // Keyboard: 1-5 calls, Space pause, [ ] speed, G economy, T live tactics, ` debug overlay.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target !== document.body) return
@@ -141,6 +147,7 @@ export const MatchScreen = ({
       if (c) match.call(you, c.id)
       else if (e.key === "g" || e.key === "G") setEconomyOpen((o) => !o)
       else if (e.key === "t" || e.key === "T") setTacticsOpen((o) => !o)
+      else if (e.key === "`") setDebugOn((o) => !o)
       else if (e.key === " ") match.setPaused(!match.snapshot().paused)
       else if (e.key === "]") match.setSpeed(Math.min(8, match.snapshot().speed * 2))
       else if (e.key === "[") match.setSpeed(Math.max(1, match.snapshot().speed / 2))
@@ -161,6 +168,11 @@ export const MatchScreen = ({
     <div className="pointer-events-none absolute inset-0 text-white">
       <Scoreboard snap={snap} draft={draft} you={you} />
       <PhaseChip snap={snap} you={you} />
+      {debugOn ? (
+        <output className="absolute top-[4.6rem] left-1/2 -translate-x-1/2 rounded-sm border border-amber-300/50 bg-black/60 px-2 py-0.5 font-mono text-[11px] tracking-wider text-amber-200">
+          DEBUG · rings · slots · velocity · locks — press ` to hide
+        </output>
+      ) : null}
 
       {/* hero frames: yours left, theirs right */}
       <HeroColumn
