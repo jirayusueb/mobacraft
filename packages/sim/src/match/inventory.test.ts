@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   BACKPACK_MUTE_S,
   addItem,
+  addToStash,
   countItems,
   emptyInventory,
   effectiveItems,
@@ -9,6 +10,7 @@ import {
   NEUTRAL_TIERS,
   netWorthItems,
   promoteFirstBackpack,
+  pullStash,
   removeItem,
   rollNeutralDrop,
   swapToMain,
@@ -109,5 +111,27 @@ describe("neutral drops (spec/10 layer 1)", () => {
       }
     }
     expect(() => itemById("n-trinket")).toThrow()
+  })
+})
+
+describe("stash (spec/10 S3)", () => {
+  test("remote buys land in the stash and pullStash moves them, not duplicates", () => {
+    const inv = emptyInventory()
+    expect(addToStash(inv, "steel")).toBeTrue()
+    expect(addToStash(inv, "orb")).toBeTrue()
+    expect(effectiveItems(inv, 0)).toEqual([]) // stash grants nothing
+    expect(netWorthItems(inv)).toBe(1000)
+    expect(pullStash(inv)).toEqual(["steel", "orb"])
+    expect(inv.stash.every((x) => x === null)).toBeTrue()
+    expect(inv.main.slice(0, 2)).toEqual(["steel", "orb"])
+    expect(netWorthItems(inv)).toBe(1000) // moved, not duplicated
+  })
+
+  test("pullStash stops when main and backpack are full", () => {
+    const inv = emptyInventory()
+    for (let i = 0; i < 9; i++) addItem(inv, "boots")
+    addToStash(inv, "steel")
+    expect(pullStash(inv)).toEqual([])
+    expect(inv.stash[0]).toBe("steel")
   })
 })

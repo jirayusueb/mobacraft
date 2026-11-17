@@ -21,11 +21,13 @@ import { NEUTRALS_BY_CAMP } from "../kinds.ts"
 import type { FxEvent, Population, StructureStatus, Unit } from "../population.ts"
 import type { DraftSide, DraftState } from "./draft.ts"
 import { type Ability, type Effect, type HeroDef, type Role, heroDef } from "./heroes.ts"
+import { itemById, missingComponents, recipeCost } from "./items.ts"
 import {
   BACKPACK_SLOTS,
   MAIN_SLOTS,
   type HeroInventory,
   addItem,
+  addToStash,
   allItems,
   countItems,
   effectiveItems,
@@ -33,10 +35,17 @@ import {
   lookupItem,
   netWorthItems,
   promoteFirstBackpack,
+  pullStash,
   removeItem,
   rollNeutralDrop,
 } from "./inventory.ts"
-import { itemById, missingComponents, recipeCost } from "./items.ts"
+import {
+  type CourierState,
+  advanceCourier,
+  courierBusy,
+  createCourier,
+  dispatchCourier,
+} from "./courier.ts"
 import { matchupDamageMul, synergyPowerMul, teamSynergy } from "./matrix.ts"
 import {
   DynamicNav,
@@ -295,6 +304,8 @@ interface HeroState {
   items: string[]
   /** Zone inventory (spec/10 layer 1). `items` is its effective projection. */
   inv: HeroInventory
+  /** Items on the team courier addressed to this hero (net worth, not power). */
+  inTransit: string[]
   skillCd: number
   ultCd: number
   respawn: number
@@ -436,6 +447,14 @@ export interface FeedEntry {
   readonly text: string
 }
 
+export interface CourierLine {
+  readonly side: DraftSide
+  readonly x: number
+  readonly z: number
+  readonly cargo: readonly string[]
+  readonly targetHero: string | null
+}
+
 export interface MatchSnapshot {
   readonly time: number
   readonly speed: number
@@ -461,6 +480,8 @@ export interface MatchSnapshot {
   /** Map control 0..1 (visible walkable area). */
   readonly control: Readonly<Record<DraftSide, number>>
   readonly wards: readonly WardLine[]
+  /** Team couriers (spec/10 S3). */
+  readonly couriers: readonly CourierLine[]
   readonly wardStock: Readonly<
     Record<DraftSide, { readonly charges: number; readonly next: number }>
   >
@@ -562,7 +583,10 @@ const skillMul = (h: HeroState) => 0.8 + h.player.skill / 50 + h.mastery * 0.15
 const powerOf = (h: HeroState) => 1 + h.items.reduce((s, id) => s + (lookupItem(id).power ?? 0), 0)
 const itemSum = (h: HeroState, k: "magicResist" | "armor") =>
   h.items.reduce((s, id) => s + (lookupItem(id)[k] ?? 0), 0)
-const netWorthOf = (h: HeroState) => Math.round(h.gold + netWorthItems(h.inv))
+const netWorthOf = (h: HeroState) =>
+  Math.round(
+    h.gold + netWorthItems(h.inv) + h.inTransit.reduce((s, id) => s + lookupItem(id).cost, 0),
+  )
 const sideOf = (team: Team): DraftSide => TEAM_SIDE[team]
 /** Item active ready (spec/10 layer 4): owned in the effective set and off cooldown. */
 const ready = (h: HeroState, id: string) => h.items.includes(id) && (h.itemCd[id] ?? 0) <= 0
@@ -710,6 +734,50 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const wardStock = {
     blue: { charges: WARD_START, next: WARD_RECHARGE },
     red: { charges: WARD_START, next: WARD_RECHARGE },
+  }
+
+  // Couriers (spec/10 S3): one per team, created after fountains are known.
+  let couriers: Record<DraftSide, CourierState> | null = null
+  const courierOf = (side: DraftSide): CourierState => {
+    couriers ??= {
+      blue: createCourier("blue", fountain(SIDE_TEAM.blue)),
+      red: createCourier("red", fountain(SIDE_TEAM.red)),
+    }
+    return couriers[side]
+  }
+  /** Fly stash items out; deliver into the hero's inventory on arrival. */
+  const tickCouriers = (dt: number) => {
+    for (const side of ["blue", "red"] as const) {
+      const c = courierOf(side)
+      const home = fountain(SIDE_TEAM[side])
+      if (!courierBusy(c)) {
+        // First hero (by id) with stash items who is away from base.
+        const b = heroes.find(
+          (x) =>
+            x.hero!.side === side &&
+            x.alive &&
+            x.hero!.inv.stash.some((i) => i !== null) &&
+            dist(x, home) >= 14,
+        )
+        if (b) {
+          const h = b.hero!
+          const load = h.inv.stash.filter((i): i is string => i !== null)
+          if (dispatchCourier(c, b.id, b, load)) {
+            for (const id of load) removeItem(h.inv, id)
+            h.inTransit = [...load]
+          }
+        }
+      }
+      const target = c.targetHero ? heroes.find((x) => x.id === c.targetHero) : undefined
+      const delivered = advanceCourier(c, target?.alive ? target : null, home, dt)
+      if (target && delivered.length > 0) {
+        const h = target.hero!
+        h.inTransit = []
+        for (const id of delivered) if (!addItem(h.inv, id)) addToStash(h.inv, id)
+        h.items = effectiveItems(h.inv, clock)
+        recomputeStats(target)
+      }
+    }
   }
 
   const bodies: Body[] = []
@@ -874,6 +942,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           gold: 600,
           items: [],
           inv: emptyInventory(),
+          inTransit: [],
           skillCd: 0,
           ultCd: 0,
           respawn: 0,
@@ -1859,8 +1928,17 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const id = buildById(pt.build).items[h.buildIdx]
     return id ? { id, adaptive: false } : null
   }
-  const buy = (b: Body) => {
+  /**
+   * Buy toward the next item. At base items land in the inventory; away from
+   * base they land in the stash and the courier delivers them (spec/10 S3).
+   */
+  const buy = (b: Body, atBase: boolean) => {
     const h = b.hero!
+    const place = (id: string) => (atBase ? addItem(h.inv, id) : addToStash(h.inv, id))
+    if (atBase && pullStash(h.inv).length > 0) {
+      h.items = effectiveItems(h.inv, clock)
+      recomputeStats(b)
+    }
     // Component-first (spec/10 layer 2): buy pieces as they become affordable,
     // then pay the recipe to combine. Net spend equals the full item cost.
     for (let guard = 0; guard < 8; guard++) {
@@ -1871,8 +1949,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         const piece = missing[0]!
         const pieceCost = itemById(piece).cost
         if (h.gold < pieceCost) return
+        if (!atBase && !h.inv.stash.includes(null)) return
         h.gold -= pieceCost
-        addItem(h.inv, piece)
+        place(piece)
         h.items = effectiveItems(h.inv, clock)
         recomputeStats(b)
         continue // same target next guard iteration
@@ -1881,7 +1960,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if (h.gold < recipe) return
       h.gold -= recipe
       for (const c of itemById(next.id).components) removeItem(h.inv, c)
-      addItem(h.inv, next.id)
+      place(next.id)
       h.items = effectiveItems(h.inv, clock)
       if (next.adaptive) h.adaptiveDone = true
       else h.buildIdx++
@@ -2039,7 +2118,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
     // Shopping (spec/06): always at base; `on-item` walks home for an affordable item.
     const atBase = dist(b, fountain(b.team as Team)) < 14
-    if (atBase) buy(b)
+    buy(b, atBase)
     const next = nextItemOf(h)
     if (
       !atBase &&
@@ -3115,6 +3194,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
     crowdTick(dt)
 
+    tickCouriers(dt)
+
     // AI coaches
     for (const side of aiSides) aiCoach(side)
 
@@ -3399,6 +3480,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     netWorth: { blue: sideSum("blue", netWorthOf), red: sideSum("red", netWorthOf) },
     sources: { blue: roundSources(sources.blue), red: roundSources(sources.red) },
     control: { ...control },
+    couriers: (["blue", "red"] as const).map((side) => {
+      const c = courierOf(side)
+      return { side, x: c.x, z: c.z, cargo: [...c.cargo], targetHero: c.targetHero }
+    }),
     wards: wards.map((w) => ({
       id: w.id,
       side: w.side,

@@ -133,6 +133,30 @@ export const promoteFirstBackpack = (inv: HeroInventory, t: number): boolean => 
   return id !== undefined && swapToMain(inv, id, t)
 }
 
+/** Buy straight into the stash zone (remote purchase, spec/10 S3). */
+export const addToStash = (inv: HeroInventory, id: string): boolean => {
+  const i = inv.stash.indexOf(null)
+  if (i < 0) return false
+  inv.stash[i] = id
+  return true
+}
+
+/** Drain the stash into main/backpack; returns moved ids (at base, no courier). */
+export const pullStash = (inv: HeroInventory): readonly string[] => {
+  const moved: string[] = []
+  for (let i = 0; i < inv.stash.length; i++) {
+    const id = inv.stash[i]
+    if (id === null || id === undefined) continue
+    // Only pull while main/backpack has room; clear the stash slot by index
+    // first so addItem cannot re-place the item into the stash itself.
+    if (!inv.main.includes(null) && !inv.backpack.includes(null)) break
+    inv.stash[i] = null
+    addItem(inv, id)
+    moved.push(id)
+  }
+  return moved
+}
+
 // --- neutral items (spec/10 Layer 1: stat-mod pool, ≤1 tag, no actives) --------------------
 
 export const NEUTRAL_TIERS: readonly (readonly string[])[] = [

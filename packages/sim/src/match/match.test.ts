@@ -196,3 +196,26 @@ describe("match", () => {
     expect(m.fx()).toHaveLength(0)
   })
 })
+
+describe("itemization in a live match (spec/10)", () => {
+  test("couriers deliver stash items and net worth counts every zone", () => {
+    const m = createMatch(map, autoDraft(), { seed: 11 })
+    let sawCargo = false
+    let sawStash = false
+    while (m.time() < 14 * 60 && !m.snapshot().winner) {
+      m.runToEnd(m.time() + 5)
+      const s = m.snapshot()
+      if (s.couriers.some((c) => c.cargo.length > 0)) sawCargo = true
+      if (s.heroes.some((h) => h.stash.some((i) => i !== null))) sawStash = true
+      if (sawCargo && sawStash) break
+    }
+    expect(sawStash).toBeTrue()
+    expect(sawCargo).toBeTrue()
+    const s = m.snapshot()
+    expect(s.couriers).toHaveLength(2)
+    for (const side of ["blue", "red"] as const) {
+      const lines = s.heroes.filter((h) => h.side === side)
+      expect(s.netWorth[side]).toBe(lines.reduce((a, h) => a + h.netWorth, 0))
+    }
+  }, 60_000)
+})
