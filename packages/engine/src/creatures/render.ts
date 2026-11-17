@@ -84,14 +84,7 @@ export const createUnitLayer = (map: MobaMap) => {
   }
 
   /** Write this frame's units into the instance buffers. `camQ` orients health bars. */
-  const update = (
-    units: readonly Unit[],
-    camQ: Quaternion,
-    showBars: boolean,
-    dt: number,
-    /** Game seconds per real second (swing extrapolation, spec/13). */
-    timeScale = 1,
-  ) => {
+  const update = (units: readonly Unit[], camQ: Quaternion, showBars: boolean, dt: number) => {
     clock += dt
     frame++
     counts.clear()
@@ -103,7 +96,7 @@ export const createUnitLayer = (map: MobaMap) => {
         st = createAnimState(u)
         states.set(u.id, st)
       }
-      stepAnim(st, u, dt, skins.get(u.kind)?.stride ?? 1, timeScale)
+      stepAnim(st, u, dt, skins.get(u.kind)?.stride ?? 1)
       st.frame = frame
       // Dying units keep animating (and keep their health bar hidden) until sunk.
       if (u.alive === false && st.death >= 1) continue

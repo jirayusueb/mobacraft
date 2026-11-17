@@ -24,16 +24,13 @@ export const swingTiming = (
   cls: "hero" | "creep" | "neutral" | "roshan" | "tower" | "other",
   baseAttackTime: number,
   attackSpeedMul: number,
-  /** Per-unit feel at attack-speed 1 (spec/13 §1); omitted → class default. */
-  override?: SwingTiming,
 ): SwingTiming => {
   const base =
-    override ??
-    (cls === "tower"
+    cls === "tower"
       ? { point: 0.1, backswing: 0.3 }
       : cls === "creep"
         ? { point: 0.3, backswing: 0.4 }
-        : { point: 0.3, backswing: 0.5 })
+        : { point: 0.3, backswing: 0.5 }
   const k = 1 / Math.max(0.1, attackSpeedMul)
   const bat = baseAttackTime * k
   const point = Math.min(base.point * k, bat * 0.5)
@@ -45,8 +42,6 @@ export interface Swing {
   phase: AttackPhase
   /** Seconds left in the current phase. */
   left: number
-  /** Total seconds of the current phase (renderer progress, spec/13 §2). */
-  dur: number
   targetId?: string
   /** Cooldown charged at point start (refunded on cancel). */
   charged: number
@@ -58,7 +53,6 @@ export interface Swing {
 export const newSwing = (): Swing => ({
   phase: "idle",
   left: 0,
-  dur: 0,
   charged: 0,
   backswing: 0,
   castLock: 0,
@@ -71,7 +65,6 @@ export const isLocked = (s: Swing) => s.phase === "point" || s.castLock > 0
 export const beginSwing = (s: Swing, targetId: string, timing: SwingTiming, cooldown: number) => {
   s.phase = "point"
   s.left = timing.point
-  s.dur = timing.point
   s.targetId = targetId
   s.charged = cooldown
   s.backswing = timing.backswing
@@ -102,7 +95,6 @@ export const tickSwing = (
     if (s.left <= 1e-9) {
       s.phase = s.backswing > 0 ? "backswing" : "idle"
       s.left = s.backswing
-      s.dur = s.backswing
       return "damage"
     }
     return "none"

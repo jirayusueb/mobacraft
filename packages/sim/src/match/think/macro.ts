@@ -26,11 +26,11 @@ export interface RoleWeights {
   readonly split: number
 }
 export const ROLE_WEIGHTS: Readonly<Record<Role, RoleWeights>> = {
-  carry: { farm: 1, gank: 0.35, fight: 0.6, split: 0.8 },
-  mid: { farm: 0.8, gank: 0.7, fight: 0.8, split: 0.5 },
-  offlane: { farm: 0.6, gank: 0.55, fight: 0.95, split: 0.4 },
-  jungle: { farm: 0.7, gank: 0.9, fight: 0.8, split: 0.45 },
-  support: { farm: 0.25, gank: 0.6, fight: 0.85, split: 0.1 },
+  carry: { farm: 1, gank: 0.4, fight: 0.6, split: 0.8 },
+  mid: { farm: 0.8, gank: 0.8, fight: 0.8, split: 0.5 },
+  offlane: { farm: 0.6, gank: 0.65, fight: 0.95, split: 0.4 },
+  jungle: { farm: 0.7, gank: 1, fight: 0.8, split: 0.45 },
+  support: { farm: 0.25, gank: 0.7, fight: 0.85, split: 0.1 },
 }
 
 export interface HeroTraits {
@@ -103,8 +103,10 @@ export interface Bias {
 
 export const COMMITMENT = 0.1
 
+/** Tiles over which a fight's pull halves (spec/09 tuning 2026-11-17). */
+export const FIGHT_DECAY = 25
 const teamObjectiveBase = (phase: Phase, onObjective: number) =>
-  (phase === "laning" ? 0.1 : phase === "mid" ? 0.3 : 0.45) + 0.25 * Math.min(1, onObjective / 3)
+  (phase === "laning" ? 0.08 : phase === "mid" ? 0.22 : 0.36) + 0.25 * Math.min(1, onObjective / 3)
 
 /** Raw 0..1 scores before biases. */
 export const baseScores = (i: MacroInput, mode: ObjectiveMode): Record<MacroAction, number> => {
@@ -114,12 +116,12 @@ export const baseScores = (i: MacroInput, mode: ObjectiveMode): Record<MacroActi
   const readiness =
     (1 + (i.ultReady ? 1 : 0) + (i.canCast ? 1 : 0) + (i.manaPct >= 0.4 ? 1 : 0)) / 4
   const fight =
-    (Math.min(1, i.alliesFighting / 2) *
+    ((0.4 + 0.6 * Math.min(1, i.alliesFighting / 2)) *
       readiness *
       clamp01(i.fightOdds) *
       w.fight *
       (i.blinkReady ? 1.3 : 1)) /
-    (1 + i.fightDist / 15)
+    (1 + i.fightDist / FIGHT_DECAY)
   const objective =
     mode === "split"
       ? clamp01(i.pushPower) * clamp01(i.farSide) * w.split
@@ -231,7 +233,7 @@ export const computeBias = (b: BiasInput): Bias => {
           : b.plans.late
     switch (plan) {
       case "group":
-        m("objective", 1.4)
+        m("objective", 1.25)
         break
       case "split":
         if (b.isCore) {

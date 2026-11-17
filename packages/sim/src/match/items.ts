@@ -130,6 +130,7 @@ export const ITEMS: readonly Item[] = [
     tags: [],
     hp: 150,
     power: 0.12,
+    mana: 150,
   },
   {
     id: "bow",
@@ -169,6 +170,7 @@ export const ITEMS: readonly Item[] = [
     components: ["orb"],
     tags: [],
     power: 0.25,
+    mana: 100,
   },
   {
     id: "staff",
@@ -179,6 +181,7 @@ export const ITEMS: readonly Item[] = [
     tags: [],
     power: 0.35,
     hp: 120,
+    mana: 200,
   },
   {
     id: "nullstone",
@@ -200,6 +203,7 @@ export const ITEMS: readonly Item[] = [
     hp: 260,
     armor: 4,
     power: 0.1,
+    mana: 100,
   },
   // --- tier 4: situational (rule engine, spec/07 §4b) ----------------------------------
   {
@@ -263,6 +267,7 @@ export const ITEMS: readonly Item[] = [
     tags: ["save", "mobility"],
     power: 0.1,
     active: { cooldown: 18, trigger: "allySave" },
+    manaRegen: 1,
   },
   {
     id: "eul",
@@ -274,6 +279,7 @@ export const ITEMS: readonly Item[] = [
     power: 0.15,
     speed: 0.1,
     active: { cooldown: 22, trigger: "selfCleanse" },
+    manaRegen: 1.5,
   },
 ]
 

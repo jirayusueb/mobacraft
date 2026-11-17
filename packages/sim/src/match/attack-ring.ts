@@ -238,30 +238,6 @@ export class AttackRings {
     this.#rings.delete(targetId)
   }
 
-  /** Every live ring with its slots and holders (debug overlay, spec/13 §4). */
-  *entries(): Generator<{
-    targetId: string
-    geo: RingGeometry
-    slots: { ring: 1 | 2; offset: Pos; holder?: string }[]
-  }> {
-    for (const [targetId, ring] of this.#rings) {
-      const slots: { ring: 1 | 2; offset: Pos; holder?: string }[] = []
-      for (const which of [1, 2] as const) {
-        const n = which === 1 ? ring.geo.n1 : ring.geo.n2
-        for (let i = 0; i < n; i++) {
-          const slot: Slot = { ring: which, index: i }
-          const holder = ring.holders[this.#flat(ring, slot)]
-          slots.push({
-            ring: which,
-            offset: this.offset(targetId, slot),
-            ...(holder === undefined ? {} : { holder }),
-          })
-        }
-      }
-      yield { targetId, geo: ring.geo, slots }
-    }
-  }
-
   /** Free slot count on a ring (for tests and debug). */
   free(targetId: string, which: 1 | 2): number {
     const ring = this.#rings.get(targetId)

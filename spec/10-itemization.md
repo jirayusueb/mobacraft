@@ -157,8 +157,18 @@ nearest visible enemy hero within 3 tiles, tiebreak by unit id.
 
 ## Layer 4 — Active item tactical triggers
 
-`ActiveDef` effects execute through hero-systems hooks (never in the renderer).
-Combat triggers per family, all evaluated in the existing utility-AI decide step.
+**Ownership (aligned 2026-11-17):** the BKB, Blink, Force Staff and Eul's actives
+are **already implemented by spec/09 Hero Think** — effects in `match.ts`
+(`microItems`, spell immunity `st.immune`, cyclone `st.cyclone`, `displace`),
+trigger logic in the pure `think/combat.ts` (`defensiveTrigger`,
+`initiatorEngage`, `blinkLanding`, `awayFrom`). spec/10 does **not** add a second
+active system. Layer 4 owns only: the `ActiveDef` data on items (cooldown +
+trigger family, read by the spec/09 code), new families that spec/09 lacks
+(Manta-style root/silence self-cleanse, Glimmer, Tango, ward placement), and
+any trigger refinement — added as new branches of `defensiveTrigger` /
+`microItems`, with `think/think.test.ts` cases. The rows below for BKB, Blink,
+Eul's and Force are the **target refinements** over spec/09's current triggers;
+spec/09's thresholds stay authoritative until a refinement lands with a test.
 
 | Family                | Trigger                                                                                                                                                                                                                                                  |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -173,6 +183,8 @@ Cooldowns, mana costs, and the 6 s mute all gate activation. Every activation
 appends to the comms feed ("Poppins used Blink Dagger"). The positional
 Blink here **replaces** spec/07's "first engage ability reaches 10 tiles"
 blink approximation — the old mechanic is deleted in S5b, not run alongside.
+Implementation home for every active: spec/09's `microItems` (effects) and
+`think/combat.ts` (when to fire) — one system, never two.
 
 ## Layer 5 — Economy & net worth
 
@@ -209,10 +221,13 @@ blink approximation — the old mechanic is deleted in S5b, not run alongside.
 4. **S4 Item AI: skeleton + threat scoring + buyback floor** — hard rule
    override wraps scoring; acceptance = all spec/07 §4 rule tests unchanged
    - buy-before ordering test + new scenario tests (enemy evasion → mkb).
-5. **S5a Self-target actives** (BKB, Manta/Eul's self-cleanse, Tango) —
-   deterministic trigger tests via seeded matches. **S5b Targeted-other +
-   positional actives** (Force/Glimmer saves, ward placement AI, positional
-   Blink replacing spec/07's approximation).
+5. **S5a Self-target actives** — BKB and Eul's already ship via spec/09 Hero
+   Think (`think/combat.ts` + `microItems`); S5a adds only Manta-style
+   root/silence self-cleanse and Tango as new `defensiveTrigger` branches,
+   with deterministic trigger tests. **S5b Targeted-other + positional
+   actives** — Force saves and positional Blink also ship via spec/09; S5b adds
+   Glimmer, ward placement AI, and deletes spec/07's `blinkReach`
+   approximation in `hero-systems.ts` (no longer read by the match).
 6. **S6 Late-game slot & asset management + comeback gold + balance re-gate.**
 
 Dependency rules unchanged: everything is `@mobacraft/sim` pure code; engine

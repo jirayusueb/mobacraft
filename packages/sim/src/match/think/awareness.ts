@@ -48,7 +48,8 @@ export interface TargetView {
   readonly magicTaken: number
 }
 
-export const BURST_WINDOW = 3
+/** Seconds of attacks counted in burst — a gank includes the chase (tuned 3 → 5). */
+export const BURST_WINDOW = 5
 
 /** Kill Potential K = burst ÷ effective hp, clamped to 0..1. */
 export const killPotential = (me: BurstView, t: TargetView): number => {

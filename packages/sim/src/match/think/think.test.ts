@@ -62,7 +62,7 @@ describe("layer 1 — awareness", () => {
 
   test("kill potential = burst ÷ effective hp, clamped", () => {
     const me = { ultDamage: 300, skillDamage: 100, attackDps: 50 }
-    expect(killPotential(me, { hp: 950, physicalTaken: 0.5, magicTaken: 1 })).toBeCloseTo(0.5)
+    expect(killPotential(me, { hp: 1050, physicalTaken: 0.5, magicTaken: 1 })).toBeCloseTo(0.5)
     expect(killPotential(me, { hp: 100, physicalTaken: 1, magicTaken: 1 })).toBe(1)
     expect(
       killPotential(

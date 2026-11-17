@@ -146,7 +146,7 @@ export const defensivePurchase = (
   const want = initiatorMelee
     ? { id: "blink", at: 1 }
     : role === "carry"
-      ? { id: "bkb", at: 3 }
+      ? { id: "bkb", at: 2 }
       : role === "support"
         ? { id: "force", at: 2 }
         : role === "mid"
@@ -324,7 +324,7 @@ export const createBrain = <B extends BrainBody>(ctx: BrainCtx<B>) => {
     )
     const aggr = ctx.aggression(b)
     const ratio = aggr <= 50 ? 1.2 - 0.008 * aggr : 0.8 - 0.002 * (aggr - 50)
-    const fightOdds = localTheirs > 0 ? clamp01((0.5 * localMine) / (localTheirs * ratio)) : 0
+    const fightOdds = localTheirs > 0 ? clamp01((0.75 * localMine) / (localTheirs * ratio)) : 0
 
     // Engage on the spot (micro-combat entry): visible enemies close, odds acceptable.
     const myPower = allies.filter((a) => d2(a, me) <= 9).reduce((s, a) => s + powerOfAlly(a), 0)
@@ -445,7 +445,21 @@ export const createBrain = <B extends BrainBody>(ctx: BrainCtx<B>) => {
     const urgent = decision.scores.retreat >= RETREAT_URGENT
     const fightNow = engage && action !== "save" && !(action === "retreat" && urgent)
     if (fightNow) action = "fight"
-    else if (action === "retreat" && !urgent && nearFoes.length === 0 && hpPct >= 0.45)
+    // A weak retreat score with nobody around is not a reason to walk home.
+    else if (
+      action === "retreat" &&
+      nearFoes.length === 0 &&
+      hpPct >= 0.5 &&
+      decision.scores.retreat < 0.3
+    )
+      action = decision.scores.farm >= decision.scores.objective ? "farm" : "objective"
+    else if (
+      action === "retreat" &&
+      !urgent &&
+      nearFoes.length === 0 &&
+      // Healthy (≥ 80 %) always releases; 45–80 % releases only if not already fleeing.
+      (hpPct >= 0.8 || (hpPct >= 0.45 && h.lastAction !== "retreat"))
+    )
       action = decision.scores.farm >= decision.scores.objective ? "farm" : "objective"
 
     // --- Layer 4: reservations -------------------------------------------------
