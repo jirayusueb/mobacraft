@@ -167,8 +167,20 @@ export const createBrain = <B extends BrainBody>(ctx: BrainCtx<B>) => {
     blue: new ThreatMap(128),
     red: new ThreatMap(128),
   }
-  const enemiesOf = (side: DraftSide) => ctx.heroes.filter((x) => x.hero!.side !== side)
-  const alliesOf = (side: DraftSide) => ctx.heroes.filter((x) => x.hero!.side === side)
+  // Hero roster and sides are fixed once the match starts: memoize per side, built lazily
+  // (createBrain may run before the roster is filled). Callers only read these arrays.
+  const sideCache = new Map<string, readonly B[]>()
+  const bySide = (side: DraftSide, mine: boolean): readonly B[] => {
+    const key = `${side}:${mine}`
+    let v = sideCache.get(key)
+    if (!v || v.length === 0) {
+      v = ctx.heroes.filter((x) => (x.hero!.side === side) === mine)
+      sideCache.set(key, v)
+    }
+    return v
+  }
+  const enemiesOf = (side: DraftSide) => bySide(side, false)
+  const alliesOf = (side: DraftSide) => bySide(side, true)
   const tick = () => Math.round(ctx.clock() * TICKS_PER_S)
 
   /** Enemy max hp / mitigation from public data: def + level + items last seen. */

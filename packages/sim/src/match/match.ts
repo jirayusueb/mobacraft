@@ -716,7 +716,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
   /** Barracks destroyed per (attacking side, lane) → that side's creeps in that lane are empowered. */
   const empowered = new Set<string>()
-  const campTimers = new Map<string, number>()
+  /** Camp respawn countdowns, mutated in place (Map order = insertion order, as before). */
+  const campTimers = new Map<string, { left: number }>()
   let roshanTimer = 0
 
   // --- tactics state (spec/06) ------------------------------------------------------
@@ -987,8 +988,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   // --- heroes --------------------------------------------------------------------
+  const fountainPos = (team: Team) =>
+    map.structures.find((s) => s.kind === "fountain" && s.team === team)!.position
+  /** Read-only fountain positions for hot-path distance checks (fountain() returns a copy). */
+  const FOUNTAIN: Readonly<Record<string, { readonly x: number; readonly z: number }>> = {
+    radiant: fountainPos("radiant"),
+    dire: fountainPos("dire"),
+  }
   const fountain = (team: Team) => {
-    const f = map.structures.find((s) => s.kind === "fountain" && s.team === team)!.position
+    const f = fountainPos(team)
     return { x: f.x, z: f.z }
   }
   const heroes: Body[] = []
@@ -1389,7 +1397,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           (b) => b.alive && b.type === "neutral" && b.home?.campId === campId,
         )
         if (!remaining) {
-          campTimers.set(campId, CAMP_RESPAWN)
+          campTimers.set(campId, { left: CAMP_RESPAWN })
           const kh = killer?.hero
           if (kh) {
             const idx = map.camps.findIndex((c) => c.id === campId)
@@ -1569,7 +1577,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       const o = nearCast[k]!
       if (isEnemy(b, o) && !o.structure && seen(b, o)) foes.push(o)
     }
-    const friends = heroes.filter((o) => o.alive && o.team === b.team)
+    // Only ally-target abilities read this; build it on demand.
+    const friendsOf = () => heroes.filter((o) => o.alive && o.team === b.team)
     let targets: Body[] = []
     let at: { x: number; z: number } = b
     let radius = 0
@@ -1669,7 +1678,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           targets = [b]
         break
       case "ally": {
-        const hurt = friends
+        const hurt = friendsOf()
           .filter((f) => dist(f, b) <= tg.range && f.hp / f.maxHp < 0.88)
           .toSorted((x, y) => x.hp / x.maxHp - y.hp / y.maxHp)[0]
         if (hurt) {
@@ -1679,7 +1688,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         break
       }
       case "ally-aoe": {
-        const group = friends.filter((f) => dist(f, b) <= tg.radius)
+        const group = friendsOf().filter((f) => dist(f, b) <= tg.radius)
         const hurt = group.filter((f) => f.hp / f.maxHp < 0.7).length
         if (group.length >= minT && (hurt >= 1 || heroFoes.some((f) => dist(f, b) < 6))) {
           targets = group
@@ -2433,7 +2442,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const h = b.hero!
     if (b.st.stun > 0 || b.st.cyclone > 0) return false
     const enemies = brain.known(h.side, 0).filter((e) => e.visible)
-    const near7 = enemies.filter((e) => dist(e.pos, b) <= 7).length
+    let near7 = 0
+    let near4 = 0
+    for (const e of enemies) {
+      const d = dist(e.pos, b)
+      if (d <= 7) near7++
+      if (d <= 4) near4++
+    }
     const fightStart = near7 > 0 && clock - h.lastEnemyNear >= 10
     if (near7 > 0) h.lastEnemyNear = clock
     const readySet = new Set(
@@ -2446,7 +2461,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       ready: readySet,
       sinceHeroDamage: clock - h.lastHeroDamage,
       incomingProjectile: incomingProjectile(b),
-      enemiesClose: enemies.filter((e) => dist(e.pos, b) <= 4).length,
+      enemiesClose: near4,
       enemiesNear: near7,
       role: h.role,
       fightStart,
@@ -3313,14 +3328,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       nextWave += WAVE_INTERVAL
     }
     if (campTimers.size > 0)
-      for (const [id, t] of campTimers) {
-        const left = t - dt
-        if (left <= 0) {
+      campTimers.forEach((t, id) => {
+        t.left -= dt
+        if (t.left <= 0) {
           campTimers.delete(id)
           const camp = map.camps.find((c) => c.id === id)
           if (camp) spawnCamp(camp)
-        } else campTimers.set(id, left)
-      }
+        }
+      })
     if (roshanTimer > 0) {
       roshanTimer -= dt
       if (roshanTimer <= 0) spawnRoshan()
@@ -3390,7 +3405,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       h.ultCd = Math.max(0, h.ultCd - dt)
       h.mana = Math.min(h.maxMana, h.mana + h.manaRegen * dt)
       // Tango (spec/10 S5a): eat a tree when the heal would not be wasted.
-      const regenLeft = b.st.hots.reduce((m, x) => (x.src === b ? Math.max(m, x.t) : m), 0)
+      let regenLeft = 0
+      for (const x of b.st.hots) if (x.src === b) regenLeft = Math.max(regenLeft, x.t)
       if (tangoTrigger({ hp: b.hp, maxHp: b.maxHp, charges: h.tango, regenLeft })) {
         h.tango--
         b.st.hots.push({ hps: TANGO_HEAL / TANGO_DURATION, t: TANGO_DURATION, src: b })
@@ -3398,7 +3414,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       }
       for (const id in h.itemCd) h.itemCd[id] = Math.max(0, h.itemCd[id]! - dt)
       // Fountain regen.
-      if (dist(b, fountain(b.team as Team)) < 6) {
+      if (dist(b, FOUNTAIN[b.team]!) < 6) {
         b.hp = Math.min(b.maxHp, b.hp + b.maxHp * 0.12 * dt)
         h.mana = Math.min(h.maxMana, h.mana + h.maxMana * 0.12 * dt)
       } else b.hp = Math.min(b.maxHp, b.hp + (2 + h.level * 0.4) * dt)
