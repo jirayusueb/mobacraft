@@ -25,6 +25,16 @@ Discovery sketch. Vocabulary follows the codebase-design skill: **module**,
 - Performance budget: 60 fps on an M-series laptop at DPR ≤ 2; low draw calls
   for the static map (instancing for trees, props, grass); terrain is one mesh;
   a single 2048 shadow map (< 400 draw calls incl. shadow pass).
+- Sim memory budget (Match Day, measured under V8 with `packages/sim` benches):
+  retained heap ≤ 8 MB over baseline through a full match; sim allocation
+  ≤ 200 MB per game-minute (GC pressure, minor-GC only); the hot tick path
+  (`near`, fog shadowcast, A*, status ticking, spatial grid) stays
+  allocation-free. Every optimization must keep `bench:fingerprint`
+  byte-identical (determinism). Tools: `bun run bench:memory` (retained heap +
+  per-call payloads), `bench:alloc` (sampling heap profiler, minutes 8→14),
+  `bench:fingerprint` (4-seed runToEnd hash). 2026-11-17 pass: 5782 → 984 MB
+  per 6 game-min (−83 %), sim 1.14 → 0.53 ms/frame at 8× speed; retained
+  ≈ 5 MB; largest remaining self-allocator 7 %.
 
 ## Modules and seams
 

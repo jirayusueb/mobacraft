@@ -69,6 +69,11 @@ const DIRS = [
   [-1, 1, Math.SQRT2],
   [-1, -1, Math.SQRT2],
 ] as const
+// Flat views of DIRS for the A* inner loop: `for (const [dx, dz, cost] of DIRS)` allocated
+// an array iterator per expanded cell (the sim's largest allocation source after fog).
+const DIR_X = DIRS.map((d) => d[0])
+const DIR_Z = DIRS.map((d) => d[1])
+const DIR_COST = DIRS.map((d) => d[2])
 
 /** Min-heap of (f, cell) pairs in parallel arrays; reused across searches. */
 class CellHeap {
@@ -407,7 +412,10 @@ export class DynamicNav {
       if (c === t) break
       const cx = c % N
       const cz = (c - cx) / N
-      for (const [dx, dz, cost] of DIRS) {
+      for (let k = 0; k < 8; k++) {
+        const dx = DIR_X[k]!
+        const dz = DIR_Z[k]!
+        const cost = DIR_COST[k]!
         const x = cx + dx
         const z = cz + dz
         if (x < 0 || z < 0 || x >= N || z >= N) continue

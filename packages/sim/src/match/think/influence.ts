@@ -60,12 +60,20 @@ export class ThreatMap {
     const c = this.cols
     for (const t of input.towers) {
       const reach = t.range + 2
-      for (let cz = 0; cz < c; cz++)
-        for (let cx = 0; cx < c; cx++) {
+      // Only cells whose centre can be within reach (plus the tower's own cell); the same
+      // cells, in the same row-major order, as a full-grid scan — so sums are identical.
+      const tx = Math.floor(t.x / THREAT_CELL)
+      const tz = Math.floor(t.z / THREAT_CELL)
+      const span = Math.ceil(reach / THREAT_CELL) + 1
+      const z0 = Math.max(0, tz - span)
+      const z1 = Math.min(c - 1, tz + span)
+      const x0 = Math.max(0, tx - span)
+      const x1 = Math.min(c - 1, tx + span)
+      for (let cz = z0; cz <= z1; cz++)
+        for (let cx = x0; cx <= x1; cx++) {
           const mx = (cx + 0.5) * THREAT_CELL
           const mz = (cz + 0.5) * THREAT_CELL
-          const inCell =
-            Math.floor(t.x / THREAT_CELL) === cx && Math.floor(t.z / THREAT_CELL) === cz
+          const inCell = tx === cx && tz === cz
           if (inCell || Math.hypot(mx - t.x, mz - t.z) <= reach) this.#add(cx, cz, 0.6)
         }
     }
@@ -73,7 +81,10 @@ export class ThreatMap {
       const v = 0.25 * (1 + h.level / 10)
       const { cx, cz } = this.#cell(h.x, h.z)
       this.#add(cx, cz, v)
-      for (const [dx, dz] of NEIGHBOURS) this.#add(cx + dx, cz + dz, v / 2)
+      this.#add(cx + 1, cz, v / 2)
+      this.#add(cx - 1, cz, v / 2)
+      this.#add(cx, cz + 1, v / 2)
+      this.#add(cx, cz - 1, v / 2)
     }
     for (const g of input.ghosts) {
       if (g.age > MISSING_WINDOW || g.age < 0) continue
@@ -93,10 +104,3 @@ export class ThreatMap {
     return this.cells[cz * this.cols + cx]!
   }
 }
-
-const NEIGHBOURS: readonly (readonly [number, number])[] = [
-  [1, 0],
-  [-1, 0],
-  [0, 1],
-  [0, -1],
-]

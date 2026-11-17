@@ -59,8 +59,9 @@ export class Blackboard {
 
   /** Drop every claim held by a hero (death, retreat). */
   release(heroId: string, prefix = ""): void {
+    // Dead heroes call this every tick: only rebuild lists that actually hold a claim.
     for (const [k, list] of this.#claims)
-      if (k.startsWith(prefix))
+      if (k.startsWith(prefix) && list.some((c) => c.by === heroId))
         this.#claims.set(
           k,
           list.filter((c) => c.by !== heroId),

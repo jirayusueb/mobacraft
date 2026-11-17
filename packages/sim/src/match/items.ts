@@ -315,8 +315,15 @@ export const ITEMS: readonly Item[] = [
   },
 ]
 
+/** id → item (first match wins, as `ITEMS.find` did); looked up many times per tick. */
+const ITEM_INDEX: ReadonlyMap<string, Item> = (() => {
+  const m = new Map<string, Item>()
+  for (const i of ITEMS) if (!m.has(i.id)) m.set(i.id, i)
+  return m
+})()
+
 export const itemById = (id: string): Item => {
-  const i = ITEMS.find((x) => x.id === id)
+  const i = ITEM_INDEX.get(id)
   if (!i) throw new Error(`Unknown item ${id}`)
   return i
 }

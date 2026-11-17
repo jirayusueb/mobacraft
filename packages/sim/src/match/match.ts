@@ -139,9 +139,9 @@ import {
   WARD_START,
   type WardSpot,
   createVisionGrid,
-  wardSpots,
   zoneFor,
 } from "./vision.ts"
+import { losWardSpots } from "./ward-spots.ts"
 import {
   ATTACK_REVEAL_RADIUS,
   ATTACK_REVEAL_TICKS,
@@ -625,23 +625,34 @@ const dist = (a: { x: number; z: number }, b: { x: number; z: number }) =>
 /** Effective multipliers from player rating and mastery. */
 const otherSide = (s: DraftSide): DraftSide => (s === "blue" ? "red" : "blue")
 const skillMul = (h: HeroState) => 0.8 + h.player.skill / 50 + h.mastery * 0.15
-const buffStat = (h: HeroState, k: "power" | "hp" | "attackSpeed") =>
-  [...h.consumed].reduce(
-    (s, id) => s + ((CONSUMABLE_BUFFS[id] as Partial<Record<typeof k, number>>)[k] ?? 0),
-    0,
-  )
+const buffStat = (h: HeroState, k: "power" | "hp" | "attackSpeed") => {
+  let s = 0
+  for (const id of h.consumed)
+    s += (CONSUMABLE_BUFFS[id] as Partial<Record<typeof k, number>>)[k] ?? 0
+  return s
+}
 const powerOf = (h: HeroState) =>
   1 + h.items.reduce((s, id) => s + (lookupItem(id).power ?? 0), 0) + buffStat(h, "power")
 const itemSum = (h: HeroState, k: "magicResist" | "armor") =>
   h.items.reduce((s, id) => s + (lookupItem(id)[k] ?? 0), 0)
-const netWorthOf = (h: HeroState) =>
-  Math.round(
+const netWorthOf = (h: HeroState) => {
+  let consumed = 0
+  for (const id of h.consumed) consumed += CONSUMABLE_BUFFS[id].cost
+  return Math.round(
     h.gold +
       netWorthItems(h.inv) +
       h.inTransit.reduce((s, id) => s + lookupItem(id).cost, 0) +
-      [...h.consumed].reduce((s, id) => s + CONSUMABLE_BUFFS[id].cost, 0),
+      consumed,
   )
+}
 const sideOf = (team: Team): DraftSide => TEAM_SIDE[team]
+const timeLeft = (x: { t: number }) => x.t > 0
+/** In-place `arr = arr.filter(keep)` (same order) — status lists are ticked every 0.1 s. */
+const compact = <T>(arr: T[], keep: (x: T) => boolean) => {
+  let w = 0
+  for (let r = 0; r < arr.length; r++) if (keep(arr[r]!)) arr[w++] = arr[r]!
+  arr.length = w
+}
 /** Item active ready (spec/10 layer 4): owned in the effective set and off cooldown. */
 const ready = (h: HeroState, id: string) => h.items.includes(id) && (h.itemCd[id] ?? 0) <= 0
 const emptySources = (): Record<GoldSource, number> => ({
@@ -676,6 +687,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const rng = createRandom(options.seed)
   const lanes = new Map(map.lanes.map((l) => [l.id, polyline(l.path)]))
   const aiSides = new Set(options.aiCoach ?? [])
+  /** Array view (fixed order of insertion, as Set iteration) for the per-tick loop. */
+  const aiSideList: readonly DraftSide[] = [...aiSides]
   const maxTime = options.maxTime ?? 40 * 60
   let speed = options.speed ?? 4
   let paused = false
@@ -783,7 +796,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const cutTrees: TreeEvent[] = []
   const control = { blue: 0, red: 0 }
   let visionTimer = 0
-  const spots: readonly WardSpot[] = wardSpots(map)
+  const spots: readonly WardSpot[] = losWardSpots(map, staticFog)
   interface Ward {
     id: string
     side: DraftSide
@@ -848,6 +861,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   const bodies: Body[] = []
+  // Per-call-site scratch for near(): each site owns one so nested queries never alias.
+  const nearCast: Body[] = []
+  const nearCrowd: Body[] = []
+  const nearMicro: Body[] = []
+  const nearProj: Body[] = []
+  const nearTarget: Body[] = []
+  const nearTouch: Body[] = []
   interface Projectile {
     caster: Body
     ability: Ability
@@ -940,16 +960,19 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     })
     structureBodies.set(s.id, b)
   }
+  /** Structures in Map insertion order; the map is fixed after setup, so this never drifts. */
+  const structList: readonly Body[] = [...structureBodies.values()]
 
   /** A structure is attackable once everything in front of it on its lane (or all T3s for T4/ancient) is down. */
   const vulnerable = (b: Body): boolean => {
     const s = b.structure
     if (!s) return true
     const team = s.team as Team
-    const alive = (pred: (x: Structure) => boolean) =>
-      [...structureBodies.values()].some(
-        (o) => o.alive && o.structure && o.structure.team === team && pred(o.structure),
-      )
+    const alive = (pred: (x: Structure) => boolean) => {
+      for (const o of structList)
+        if (o.alive && o.structure && o.structure.team === team && pred(o.structure)) return true
+      return false
+    }
     if (b.type === "tower") {
       const tier = s.tier ?? 1
       if (tier === 1) return true
@@ -1540,7 +1563,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const disabler = hasDisableEffect(ability)
     const reach =
       "range" in tg ? tg.range + ("radius" in tg ? tg.radius : 0) : "radius" in tg ? tg.radius : 8
-    const foes = [...near(b, reach + 1)].filter((o) => isEnemy(b, o) && !o.structure && seen(b, o))
+    const nFoes = near(b, reach + 1, nearCast)
+    const foes: Body[] = []
+    for (let k = 0; k < nFoes; k++) {
+      const o = nearCast[k]!
+      if (isEnemy(b, o) && !o.structure && seen(b, o)) foes.push(o)
+    }
     const friends = heroes.filter((o) => o.alive && o.team === b.team)
     let targets: Body[] = []
     let at: { x: number; z: number } = b
@@ -1753,7 +1781,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const lastMode = new WeakMap<Mover, CrowdMode>()
   const crowdWorld: CrowdWorld<Mover> = {
     neighbors: (m, r, out) => {
-      for (const o of near(m, r)) if (o.alive && o.mover && o.phase! <= 0) out.push(o.mover)
+      const n = near(m, r, nearCrowd)
+      for (let k = 0; k < n; k++) {
+        const o = nearCrowd[k]!
+        if (o.alive && o.mover && o.phase! <= 0) out.push(o.mover)
+      }
     },
     walkable: (x, z, m) => {
       const b = ownerOf.get(m)
@@ -1834,7 +1866,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     b.micro = isMicro(b.micro ?? false, gd)
     if (b.micro && gd > stopAt + 0.05) {
       const blockers: Body[] = []
-      for (const o of near(b, 2)) {
+      const nMicro = near(b, 2, nearMicro)
+      for (let k = 0; k < nMicro; k++) {
+        const o = nearMicro[k]!
         if (o === b || !o.alive || dist(o, b) >= 2) continue
         // Idle teammates are not obstacles: walk at them and they yield (spec/09 §6).
         const idle =
@@ -1912,7 +1946,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       return { x: p.x, z: p.z }
     }
     // No creeps: hold near own outermost standing tower.
-    const towers = [...structureBodies.values()]
+    const towers = structList
       .filter(
         (t) => t.alive && t.type === "tower" && t.team === team && t.structure!.lane === laneId,
       )
@@ -1926,9 +1960,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const alliesNear = (b: Body, r: number) =>
     heroes.filter((h) => h.alive && h.team === b.team && dist(h, b) <= r)
   const enemyTowerNear = (b: Body, r: number) =>
-    [...structureBodies.values()].find(
-      (t) => t.alive && t.type === "tower" && t.team !== b.team && dist(t, b) <= r,
-    )
+    structList.find((t) => t.alive && t.type === "tower" && t.team !== b.team && dist(t, b) <= r)
 
   const objectiveFor = (team: Team): Body | null => {
     // Next vulnerable enemy structure, nearest to the team's centre of mass.
@@ -1936,9 +1968,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (!mine.length) return null
     const cx = mine.reduce((s, h) => s + h.x, 0) / mine.length
     const cz = mine.reduce((s, h) => s + h.z, 0) / mine.length
-    const targets = [...structureBodies.values()].filter(
-      (t) => t.alive && t.team !== team && vulnerable(t),
-    )
+    const targets = structList.filter((t) => t.alive && t.team !== team && vulnerable(t))
     return (
       targets.toSorted(
         (a, b) => Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz),
@@ -2184,10 +2214,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     h.goal = laneFront(b.team as Team, laneId)
   }
   const defendSpot = (team: Team) => {
-    const own = [...structureBodies.values()].filter(
+    const own = structList.filter(
       (t) => t.alive && t.team === team && (t.type === "tower" || t.type === "rax"),
     )
-    const anc = [...structureBodies.values()].find((t) => t.type === "ancient" && t.team === team)!
+    const anc = structList.find((t) => t.type === "ancient" && t.team === team)!
     return (
       own
         .filter((t) => (t.structure!.tier ?? 1) >= 3 || t.type === "rax")
@@ -2216,9 +2246,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           bodies.some((x) => x.alive && x.type === "neutral" && x.home?.campId === c.id),
       ),
     enemyTowers: (side) =>
-      [...structureBodies.values()].filter(
-        (t) => t.alive && t.type === "tower" && t.team !== SIDE_TEAM[side],
-      ),
+      structList.filter((t) => t.alive && t.type === "tower" && t.team !== SIDE_TEAM[side]),
     objective: (side) => {
       const o = objectiveFor(SIDE_TEAM[side])
       return o ? { x: o.x, z: o.z } : null
@@ -2605,7 +2633,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       p.z += p.dz * step
       p.left -= step
       const hits: Body[] = []
-      for (const o of near(p, p.width + 1)) {
+      const nProj = near(p, p.width + 1, nearProj)
+      for (let k = 0; k < nProj; k++) {
+        const o = nearProj[k]!
         if (p.hit.has(o.id) || o.structure || !isEnemy(p.caster, o)) continue
         if (dist(o, p) <= p.width + 0.4) {
           p.hit.add(o.id)
@@ -2618,24 +2648,47 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   // Spatial hash (4×4 tile cells), rebuilt once per tick: target queries stay O(nearby).
+  // Cells and query results are count-based: `arr.length = 0` drops the backing store in
+  // V8, so truncate-then-push reallocated every cell every tick. Slots past a cell's count
+  // are cleared after each rebuild so pruned bodies are not kept alive.
   const CELL = 4
   const COLS = Math.ceil(map.size / CELL)
   const grid: Body[][] = Array.from({ length: COLS * COLS }, () => [])
+  const gridLen = new Int32Array(COLS * COLS)
+  const gridPrev = new Int32Array(COLS * COLS)
   const rebuildGrid = () => {
-    for (const c of grid) c.length = 0
+    gridPrev.set(gridLen)
+    gridLen.fill(0)
     for (const b of bodies) {
       if (!b.alive) continue
       const cx = Math.max(0, Math.min(COLS - 1, Math.floor(b.x / CELL)))
       const cz = Math.max(0, Math.min(COLS - 1, Math.floor(b.z / CELL)))
-      grid[cz * COLS + cx]!.push(b)
+      const c = cz * COLS + cx
+      grid[c]![gridLen[c]!++] = b
+    }
+    for (let c = 0; c < grid.length; c++) {
+      const cell = grid[c]!
+      for (let k = gridLen[c]!; k < gridPrev[c]!; k++) cell[k] = undefined!
     }
   }
-  const near = function* (at: { x: number; z: number }, r: number) {
+  /**
+   * Bodies in grid cells overlapping the square of half-size r around `at`, written into
+   * the per-call-site scratch `out`; returns how many (read `out[0..n)` only). Never pass
+   * a scratch that an enclosing loop is still reading.
+   */
+  const near = (at: { x: number; z: number }, r: number, out: Body[]): number => {
+    let n = 0
     const x0 = Math.max(0, Math.floor((at.x - r) / CELL))
     const x1 = Math.min(COLS - 1, Math.floor((at.x + r) / CELL))
     const z0 = Math.max(0, Math.floor((at.z - r) / CELL))
     const z1 = Math.min(COLS - 1, Math.floor((at.z + r) / CELL))
-    for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) yield* grid[z * COLS + x]!
+    for (let z = z0; z <= z1; z++)
+      for (let x = x0; x <= x1; x++) {
+        const c = z * COLS + x
+        const cell = grid[c]!
+        for (let k = 0, len = gridLen[c]!; k < len; k++) out[n++] = cell[k]!
+      }
+    return n
   }
 
   /** Target-priority slider: 0..10 bonus for hero `o` as seen by `h`. */
@@ -2660,7 +2713,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const chooseTarget = (b: Body, radius: number): Body | undefined => {
     let best: Body | undefined
     let bestScore = -Infinity
-    for (const o of near(b, radius)) {
+    const nTarget = near(b, radius, nearTarget)
+    for (let k = 0; k < nTarget; k++) {
+      const o = nearTarget[k]!
       if (!isEnemy(b, o)) continue
       const d = dist(b, o)
       if (d > radius) continue
@@ -2813,18 +2868,25 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     s.shieldT = Math.max(0, s.shieldT - dt)
     if (s.shieldT === 0) s.shield = 0
     s.lifestealT = Math.max(0, s.lifestealT - dt)
-    for (const d of s.dots) {
+    // Index loops over the captured array (for…of semantics: length re-read, so entries
+    // pushed mid-loop are visited); no iterator or predicate closure per body per tick.
+    const dots = s.dots
+    for (let i = 0; i < dots.length; i++) {
+      const d = dots[i]!
       deal(d.src, b, d.dps * dt, "magic")
       d.t -= dt
     }
-    s.dots = s.dots.filter((d) => d.t > 0)
-    for (const hh of s.hots) {
+    compact(s.dots, timeLeft)
+    const hots = s.hots
+    for (let i = 0; i < hots.length; i++) {
+      const hh = hots[i]!
       heal(hh.src, b, hh.hps * dt)
       hh.t -= dt
     }
-    s.hots = s.hots.filter((x) => x.t > 0)
-    for (const bf of s.buffs) bf.t -= dt
-    s.buffs = s.buffs.filter((x) => x.t > 0)
+    compact(s.hots, timeLeft)
+    const buffs = s.buffs
+    for (let i = 0; i < buffs.length; i++) buffs[i]!.t -= dt
+    compact(s.buffs, timeLeft)
   }
 
   // --- phases, vision, wards, IGL, history (spec/06) --------------------------------------
@@ -3057,7 +3119,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       }
     }
     // Defend: an own structure is being hit by enemy heroes.
-    const sieged = [...structureBodies.values()].find(
+    const sieged = structList.find(
       (t) =>
         t.alive &&
         t.team === team &&
@@ -3179,10 +3241,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   /** Crowd pass (spec/09 §1–§2, §6): the only integrator of mover positions. */
   const movers: Mover[] = []
+  const wanted: number[] = []
   const touching = (b: Body) => {
     const r = b.mover!.radius + 0.6
-    for (const o of near(b, r + 1))
+    const n = near(b, r + 1, nearTouch)
+    for (let k = 0; k < n; k++) {
+      const o = nearTouch[k]!
       if (o !== b && o.alive && dist(o, b) < r + (o.mover?.radius ?? 0.8)) return true
+    }
     return false
   }
   const crowdTick = (dt: number) => {
@@ -3205,7 +3271,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       ownerOf.set(m, b)
       movers.push(m)
     }
-    const wanted = movers.map((m) => Math.hypot(m.pvx, m.pvz))
+    wanted.length = movers.length
+    for (let i = 0; i < movers.length; i++) wanted[i] = Math.hypot(movers[i]!.pvx, movers[i]!.pvz)
     crowdStep(movers, dt, crowdWorld)
     for (let i = 0; i < movers.length; i++) {
       const m = movers[i]!
@@ -3245,14 +3312,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       spawnWave()
       nextWave += WAVE_INTERVAL
     }
-    for (const [id, t] of campTimers) {
-      const left = t - dt
-      if (left <= 0) {
-        campTimers.delete(id)
-        const camp = map.camps.find((c) => c.id === id)
-        if (camp) spawnCamp(camp)
-      } else campTimers.set(id, left)
-    }
+    if (campTimers.size > 0)
+      for (const [id, t] of campTimers) {
+        const left = t - dt
+        if (left <= 0) {
+          campTimers.delete(id)
+          const camp = map.camps.find((c) => c.id === id)
+          if (camp) spawnCamp(camp)
+        } else campTimers.set(id, left)
+      }
     if (roshanTimer > 0) {
       roshanTimer -= dt
       if (roshanTimer <= 0) spawnRoshan()
@@ -3266,7 +3334,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     tickTactics(dt)
 
     rebuildGrid()
-    for (const b of bodies) {
+    for (let bi = 0; bi < bodies.length; bi++) {
+      const b = bodies[bi]!
       if (!b.alive) continue
       tickStatus(b, dt)
       if (!b.alive) continue
@@ -3275,15 +3344,21 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if (b.phase! > 0) b.phase = Math.max(0, b.phase! - dt)
       if (b.freePath! > 0) b.freePath = Math.max(0, b.freePath! - dt)
     }
-    bodyById.clear()
-    for (const b of bodies) if (b.alive) bodyById.set(b.id, b)
+    // Same membership as clear()+refill (alive bodies at this point of the tick), without
+    // rehashing the whole table every tick. Ids are never reused; pruned bodies are deleted below.
+    for (let bi = 0; bi < bodies.length; bi++) {
+      const b = bodies[bi]!
+      if (b.alive) bodyById.set(b.id, b)
+      else bodyById.delete(b.id)
+    }
     // Attack phases (spec/09 §4): damage frames land before new decisions.
     tickSwings(dt)
     // Spell projectiles move and resolve after status, before hero actions (spec/09).
     tickProjectiles(dt)
 
     // Heroes
-    for (const b of heroes) {
+    for (let bi = 0; bi < heroes.length; bi++) {
+      const b = heroes[bi]!
       const h = b.hero!
       if (!b.alive) {
         h.respawn -= dt
@@ -3393,7 +3468,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
 
     // Creeps
-    for (const b of bodies) {
+    for (let bi = 0; bi < bodies.length; bi++) {
+      const b = bodies[bi]!
       if (!b.alive || b.type !== "creep") continue
       const lane = lanes.get(b.lane!)!
       const target = chooseTarget(b, 5)
@@ -3426,7 +3502,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
 
     // Neutrals & Roshan: fight back when attacked, leash to home.
-    for (const b of bodies) {
+    for (let bi = 0; bi < bodies.length; bi++) {
+      const b = bodies[bi]!
       if (!b.alive || (b.type !== "neutral" && b.type !== "roshan")) continue
       const home = b.home!
       const aggro =
@@ -3443,7 +3520,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
 
     // Towers
-    for (const b of structureBodies.values()) {
+    for (let bi = 0; bi < structList.length; bi++) {
+      const b = structList[bi]!
       if (!b.alive || b.type !== "tower") continue
       const t = chooseTarget(b, b.range)
       if (t) attack(b, t)
@@ -3458,14 +3536,16 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
 
     // AI coaches
-    for (const side of aiSides) aiCoach(side)
+    for (const side of aiSideList) aiCoach(side)
 
     // Prune dead non-heroes occasionally.
     if (Math.round(clock / TICK) % 50 === 0) {
       for (let i = bodies.length - 1; i >= 0; i--) {
         const b = bodies[i]!
-        if (!b.alive && (b.type === "creep" || b.type === "neutral" || b.type === "roshan"))
+        if (!b.alive && (b.type === "creep" || b.type === "neutral" || b.type === "roshan")) {
           bodies.splice(i, 1)
+          bodyById.delete(b.id)
+        }
       }
     }
 
@@ -3710,7 +3790,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       })
     }
     const us: CrowdDebug["units"][number][] = []
-    for (const b of bodies) {
+    for (let bi = 0; bi < bodies.length; bi++) {
+      const b = bodies[bi]!
       const m = b.mover
       if (!b.alive || !m) continue
       us.push({
@@ -3731,7 +3812,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   const units = (): readonly Unit[] => {
     const out: Unit[] = []
-    for (const b of bodies) {
+    for (let bi = 0; bi < bodies.length; bi++) {
+      const b = bodies[bi]!
       if (b.structure) continue
       if (!b.alive && b.type !== "hero") continue
       out.push({
@@ -3752,7 +3834,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   const structures = (): readonly StructureStatus[] =>
-    [...structureBodies.values()].map((b) => ({
+    structList.map((b) => ({
       id: b.id,
       hp: Math.max(0, b.hp / b.maxHp),
       alive: b.alive,

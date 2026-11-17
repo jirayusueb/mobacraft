@@ -67,8 +67,14 @@ export const allItems = (inv: HeroInventory): string[] => [
   ...inv.stash.filter((x): x is string => x !== null),
 ]
 
-export const netWorthItems = (inv: HeroInventory): number =>
-  allItems(inv).reduce((s, id) => s + lookupItem(id).cost, 0)
+/** Allocation-free: read every snapshot and by several AI scorers each tick. */
+export const netWorthItems = (inv: HeroInventory): number => {
+  let sum = inv.neutral !== null ? lookupItem(inv.neutral).cost : 0
+  for (const id of inv.main) if (id !== null) sum += lookupItem(id).cost
+  for (const id of inv.backpack) if (id !== null) sum += lookupItem(id).cost
+  for (const id of inv.stash) if (id !== null) sum += lookupItem(id).cost
+  return sum
+}
 
 /** Free main-slot index, else free backpack index, else free stash index, else -1. */
 const freeSlot = (inv: HeroInventory): number => {
