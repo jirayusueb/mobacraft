@@ -185,6 +185,7 @@ export const PHASE_LABEL: Record<string, string> = {
 /** spec/06 gold sources (MatchSnapshot.sources). */
 export const SOURCE_LABEL: Record<string, string> = {
   passive: "Passive",
+  comeback: "Comeback",
   creeps: "Creeps",
   neutrals: "Neutrals",
   kills: "Kills",

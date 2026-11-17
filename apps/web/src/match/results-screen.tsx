@@ -5,6 +5,7 @@ import type { FlowEvent } from "./flow.ts"
 import type { MatchHistory } from "./hud-data.ts"
 import { ItemSlot } from "./item-icon.tsx"
 import { DamageBars, EconomyGraphs, GoldBreakdown, ItemTimeline } from "./results-charts.tsx"
+import { narrativeOf } from "./results-narrative.ts"
 import { HeroGem, ROLE_LABEL, TeamCrest, clockText } from "./ui.tsx"
 
 /** MVP: kills+assists weighted by damage and healing, deaths penalised. */
@@ -15,6 +16,34 @@ const mvpScore = (h: HeroLine) =>
   h.heroDamage / 1500 +
   h.healing / 1200 +
   h.lastHits / 25
+
+/** "How it went" (playtest #2): swing moment, last objectives, comeback story. */
+const NarrativeCard = ({ final, draft }: { final: MatchSnapshot; draft: DraftState }) => {
+  const lines = narrativeOf(final, { blue: draft.blue.name, red: draft.red.name })
+  if (lines.length === 0) return null
+  return (
+    <section
+      aria-label="How it went"
+      className="flex flex-col gap-1.5 rounded-xl border border-white/[0.07] bg-black/20 p-3"
+    >
+      <p className="text-[11px] font-semibold tracking-[0.18em] text-white/70 uppercase">
+        How it went
+      </p>
+      {lines.map((l) => (
+        <p
+          key={l.text}
+          className={cn(
+            "text-[12px] text-white/75",
+            l.kind === "closing" && "font-semibold text-white/90",
+            l.kind === "swing" && "text-amber-200/90",
+          )}
+        >
+          {l.text}
+        </p>
+      ))}
+    </section>
+  )
+}
 
 const Stat = ({
   icon: Icon,
@@ -121,7 +150,10 @@ export const ResultsScreen = ({
         </div>
 
         <div className="mt-4 grid grid-cols-[1fr_250px] gap-3 max-lg:grid-cols-1">
-          <EconomyGraphs final={final} you={you} />
+          <div className="flex flex-col gap-3">
+            <NarrativeCard final={final} draft={draft} />
+            <EconomyGraphs final={final} you={you} />
+          </div>
           <MvpCard mvp={mvp} winnerSide={final.winner} />
         </div>
 

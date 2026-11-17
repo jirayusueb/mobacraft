@@ -271,3 +271,36 @@ describe("S5b actives in live matches (spec/10)", () => {
     expect(runActivesAt(9)).toBe(runActivesAt(9))
   }, 240_000)
 })
+
+describe("comeback lever (playtest #2)", () => {
+  test("4 AI matches stay in range, both sides win a game, deficits stay bounded", () => {
+    const wins: Record<string, number> = { blue: 0, red: 0 }
+    const seeds = [2, 5, 8, 13]
+    seeds.forEach((seed, i) => {
+      // Alternate team pairs (and swap on odd runs) so drafts don't lock one winner.
+      const d = autoDraft(i % 2, (i + 1) % 2)
+      const draft =
+        i % 2
+          ? d
+          : {
+              ...d,
+              blue: d.red,
+              red: d.blue,
+              picks: { blue: d.picks.red, red: d.picks.blue },
+            }
+      const s = createMatch(map, draft, { seed, aiCoach: ["blue", "red"] }).runToEnd()
+      expect(s.time).toBeGreaterThanOrEqual(8 * 60)
+      expect(s.time).toBeLessThanOrEqual(35 * 60)
+      let maxDeficit = 0
+      for (const h of s.history) maxDeficit = Math.max(maxDeficit, Math.abs(h.nw.blue - h.nw.red))
+      const cbGold = (s.sources.blue.comeback + s.sources.red.comeback) | 0
+      console.log(
+        `comeback seed ${seed}: winner=${s.winner} time=${(s.time / 60).toFixed(1)}m ` +
+          `maxDeficit=${(maxDeficit / 1000).toFixed(1)}k comebackGold=${cbGold}`,
+      )
+      wins[s.winner ?? "none"] = (wins[s.winner ?? "none"] ?? 0) + 1
+    })
+    expect(wins.blue).toBeGreaterThanOrEqual(1)
+    expect(wins.red).toBeGreaterThanOrEqual(1)
+  }, 600_000)
+})

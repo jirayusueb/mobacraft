@@ -26,6 +26,7 @@ import type {
   SwingPhase,
   Unit,
 } from "../population.ts"
+import { hullOf } from "./crowd-hull.ts"
 import { heroSwing } from "./swing-timing.ts"
 import type { DraftSide, DraftState } from "./draft.ts"
 import { type Ability, type Effect, type HeroDef, type Role, heroDef } from "./heroes.ts"
@@ -179,6 +180,7 @@ export const ANTI_STALL_AT = 22 * 60
 
 export type GoldSource =
   | "passive"
+  | "comeback"
   | "creeps"
   | "neutrals"
   | "kills"
@@ -188,6 +190,7 @@ export type GoldSource =
   | "wards"
 export const GOLD_SOURCES: readonly GoldSource[] = [
   "passive",
+  "comeback",
   "creeps",
   "neutrals",
   "kills",
@@ -208,22 +211,35 @@ const XP_CURVE = [
 ]
 export const MAX_LEVEL = XP_CURVE.length
 const PASSIVE_GOLD = 2.2 // per second
+/**
+ * Comeback lever (playtest #2): the side behind on team net worth banks extra
+ * passive gold proportional to the deficit. Team rate is clamp(deficit/8000·0.8,
+ * 0, 0.8) gp/s (8k behind ≈ +1 passive gp/s equivalent), split over 5 heroes.
+ * The leading side never gets a penalty.
+ */
+const COMEBACK_PER_8000 = 0.8
+const COMEBACK_MAX = 0.8
+/** Net-worth gap below which no comeback gold flows (anti flip-flop band). */
+const COMEBACK_DEADBAND = 500
 /** Seconds after an ally death that wards prefer the death area (spec/10 layer 4). */
 const DEFENSIVE_WARD_WINDOW = 60
-const CREEP_GOLD = 38
-const CREEP_XP = 55
+// Playtest #4 (dota-2-player feedback): last hits were only 30–110 per hero over
+// 19–28 min games — "this economy is kill gold, not Dota gold". Farm income raised
+// so laning/jungle heroes build a real net worth without touching kill gold.
+const CREEP_GOLD = 58 // was 38
+const CREEP_XP = 66 // was 55
 const KILL_GOLD = 220
 const KILL_XP = 180
 const ASSIST_GOLD = 90
 const TOWER_GOLD = 160 // to every hero on the team
-const NEUTRAL_GOLD = 55
-const NEUTRAL_XP = 70
+const NEUTRAL_GOLD = 80 // was 55: jungle camps must out-earn lane creeps
+const NEUTRAL_XP = 95 // was 70
 const ROSHAN_GOLD = 200
 const XP_RANGE = 9
 export const RESPAWN_BASE = 6
 export const RESPAWN_PER_LEVEL = 2.2
 const WAVE_INTERVAL = 30
-const CAMP_RESPAWN = 60
+const CAMP_RESPAWN = 48 // was 60: a dedicated jungler gets a clear-respawn loop
 export const ROSHAN_RESPAWN = 240
 
 type UnitType = "hero" | "creep" | "neutral" | "roshan" | "tower" | "ancient" | "rax"
@@ -682,6 +698,7 @@ const compact = <T>(arr: T[], keep: (x: T) => boolean) => {
 const ready = (h: HeroState, id: string) => h.items.includes(id) && (h.itemCd[id] ?? 0) <= 0
 const emptySources = (): Record<GoldSource, number> => ({
   passive: 0,
+  comeback: 0,
   creeps: 0,
   neutrals: 0,
   kills: 0,
@@ -911,15 +928,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const lockCasts = { total: 0, onLock: 0 }
   /** Ability usage counters (balance reports / tests). */
   const casts = new Map<string, number>()
-  /** Crowd radii (spec/09 §2), keyed on unit class; structures are static. */
-  const crowdRadius = (b: Body) =>
-    b.type === "roshan"
-      ? 0.9
-      : b.kind.toString().includes("siege")
-        ? 0.45
-        : b.type === "hero"
-          ? 0.4
-          : 0.35
+  /** Crowd radii (spec/09 §2): per-kind hulls matching the rendered model footprints. */
+  const crowdRadius = (b: Body) => hullOf(b.kind)
   const newMover = (b: Body): Mover => {
     const m: Mover = {
       id: b.id,
@@ -1467,6 +1477,20 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           side: sideOf(team),
           text: `${team === "radiant" ? draft.blue.name : draft.red.name} slew Roshan${carrier?.hero ? ` — Aegis to ${carrier.hero.player.name}` : ""}`,
         })
+        if (carrier?.hero)
+          feed.push({
+            t: clock,
+            kind: "aegis",
+            side: sideOf(team),
+            text: `Aegis picked up: ${heroLabel(carrier)}`,
+          })
+        if (calls[sideOf(team)].active === "roshan")
+          feed.push({
+            t: clock,
+            kind: "roshan",
+            side: sideOf(team),
+            text: `Call paid off: Roshan down — Aegis ${carrier?.hero ? heroLabel(carrier) : "claimed"}`,
+          })
       }
       return
     }
@@ -1482,11 +1506,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if ((s.tier ?? 1) === 3) tier3Down = true
       for (const h of heroes.filter((x) => x.team === attackers))
         grant(h, TOWER_GOLD, 120, "structures")
+      const lane = s.lane ? `${s.lane[0]!.toUpperCase()}${s.lane.slice(1)}` : ""
+      const paid = calls[atkSide].active
       feed.push({
         t: clock,
         kind: "tower",
         side: atkSide,
-        text: `${atkSide === "blue" ? draft.blue.name : draft.red.name} destroyed a tier ${s.tier} tower${s.lane ? ` (${s.lane})` : ""}`,
+        text: `${atkSide === "blue" ? draft.blue.name : draft.red.name} destroyed a tier ${s.tier} tower${s.lane ? ` (${s.lane})` : ""}${paid === "push" || paid === "group" ? ` — Call paid off: ${lane} T${s.tier} tower falls` : ""}`,
       })
     } else if (target.type === "rax") {
       if (s.lane) empowered.add(`${atkSide}:${s.lane}`)
@@ -3398,6 +3424,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     // Spell projectiles move and resolve after status, before hero actions (spec/09).
     tickProjectiles(dt)
 
+    // Comeback lever (playtest #2): extra passive gold for the side behind on net worth.
+    const cbGap = sideSum("blue", netWorthOf) - sideSum("red", netWorthOf)
+    const cbSide: DraftSide | null =
+      cbGap > COMEBACK_DEADBAND ? "red" : cbGap < -COMEBACK_DEADBAND ? "blue" : null
+    const cbPerHero = cbSide
+      ? Math.min(COMEBACK_MAX, (Math.abs(cbGap) / 8000) * COMEBACK_PER_8000) / 5
+      : 0
+
     // Heroes
     for (let bi = 0; bi < heroes.length; bi++) {
       const b = heroes[bi]!
@@ -3428,6 +3462,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         recomputeStats(b)
       }
       sources[h.side].passive += PASSIVE_GOLD * dt
+      if (cbSide && h.side === cbSide) {
+        h.gold += cbPerHero * dt
+        h.goldEarned += cbPerHero * dt
+        sources[h.side].comeback += cbPerHero * dt
+      }
       h.skillCd = Math.max(0, h.skillCd - dt)
       h.ultCd = Math.max(0, h.ultCd - dt)
       h.mana = Math.min(h.maxMana, h.mana + h.manaRegen * dt)
@@ -3653,6 +3692,44 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       kind: "call",
       side,
       text: `${side === "blue" ? draft.blue.tag : draft.red.tag} coach: ${CALL_TEXT[c]}`,
+    })
+    // Ping the call's objective point so the call is visible on the map (playtest fix #1).
+    const team = SIDE_TEAM[side]
+    const mine = heroes.filter((x) => x.hero!.side === side)
+    const centre = {
+      x: mine.reduce((a, b) => a + b.x, 0) / mine.length,
+      z: mine.reduce((a, b) => a + b.z, 0) / mine.length,
+    }
+    const jungle = map.camps.filter((k) => k.team === team)
+    const at =
+      c === "roshan"
+        ? roshanPos
+        : c === "push"
+          ? (structList
+              .filter((t) => t.alive && t.type === "tower" && t.team !== team && vulnerable(t))
+              .toSorted((a, b) => dist(a, centre) - dist(b, centre))[0] ?? centre)
+          : c === "safe"
+            ? (structList.find((t) => t.alive && t.type === "ancient" && t.team === team) ?? centre)
+            : c === "group"
+              ? centre
+              : jungle.length
+                ? {
+                    x: jungle.reduce((a, k) => a + k.position.x, 0) / jungle.length,
+                    z: jungle.reduce((a, k) => a + k.position.z, 0) / jungle.length,
+                  }
+                : centre
+    fx({ t: clock, kind: "aoe", at, radius: 1.2, team, style: "nova" })
+    // Acknowledge every accepted call in comms (the relay only logs when a caller is alive).
+    const iglName =
+      heroes.find((x) => x.hero!.player.id === tac[side].igl)?.hero?.player.name ?? "IGL"
+    comms.push({
+      t: clock,
+      side,
+      from: "coach",
+      caller: iglName,
+      text: `Coach → ${iglName} (IGL): ${CALL_TEXT[c]}`,
+      followers: 0,
+      total: 5,
     })
     for (const h of heroes) if (h.hero!.side === side) h.hero!.followCoach = false
     if (!callerOf(side))
