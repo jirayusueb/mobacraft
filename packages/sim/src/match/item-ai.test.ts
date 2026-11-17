@@ -130,3 +130,13 @@ describe("buyback reserve (spec/10 layer 3)", () => {
     expect(goldFloor(20, 30, true, true)).toBe(0)
   })
 })
+
+describe("Manta as a counter (spec/10 S5a)", () => {
+  test("disablers raise Manta for a carry, but BKB still outranks it", () => {
+    const v = view({ heroId: "hollowfang", bookIndex: 3, items: ["boots", "bow", "blade"] })
+    expect(chooseItem(v, BOOK, threat({ disablers: 3 }))?.id).toBe("bkb")
+    expect(
+      chooseItem({ ...v, items: [...v.items, "bkb"] }, BOOK, threat({ disablers: 3 }))?.id,
+    ).toBe("manta")
+  })
+})

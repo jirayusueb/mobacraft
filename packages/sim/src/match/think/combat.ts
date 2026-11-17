@@ -19,7 +19,7 @@ export const BKB_DURATION = 6
 /** Chain-stun slack: hold a disable while the current one has more than travel + this left. */
 export const CHAIN_SLACK = 0.3
 
-export type ActiveId = "bkb" | "blink" | "force" | "eul"
+export type ActiveId = "bkb" | "blink" | "force" | "eul" | "manta"
 
 export interface ActiveView {
   readonly hpPct: number
@@ -37,22 +37,32 @@ export interface ActiveView {
   readonly role: "carry" | "mid" | "offlane" | "support" | "jungle"
   /** First tick of a fight (known enemy hero ≤ 7 tiles after ≥ 10 s without one). */
   readonly fightStart: boolean
+  /** Rooted (or silenced) right now — Manta/Eul's self-cleanse trigger (spec/10 S5a). */
+  readonly rooted?: boolean
 }
 
 export type DefensiveUse =
   | { readonly item: "bkb" }
   | { readonly item: "eul" }
   | { readonly item: "force" }
+  | { readonly item: "manta" }
   | { readonly item: "blink"; readonly escape: true }
 
 /**
  * Defensive trigger (spec/09 L3.1 + pre-fight BKB):
  *  - a lit enemy spell projectile within 3.3 tiles AND hp < 60 % → BKB, else Eul's;
  *  - hp < 25 % with an enemy hero within 4 tiles → Force Staff, else Blink home;
- *  - carry/mid at fight start with ≥ 2 enemy heroes ≤ 7 tiles → BKB.
+ *  - carry/mid at fight start with ≥ 2 enemy heroes ≤ 7 tiles → BKB;
+ *  - rooted with an enemy near → Manta, else Eul's (spec/10 S5a self-cleanse).
  */
 export const defensiveTrigger = (v: ActiveView): DefensiveUse | null => {
   if (v.stunned) return null
+  // spec/10 S5a: dispel a Root/Silence the instant it lands while enemies are
+  // close — breaks the enemy combo. Manta first (cheaper cooldown), then Eul's.
+  if (v.rooted && v.enemiesNear > 0) {
+    if (v.ready.has("manta")) return { item: "manta" }
+    if (v.ready.has("eul")) return { item: "eul" }
+  }
   if (v.incomingProjectile <= DANGER_PROJECTILE_RANGE && v.hpPct < 0.6) {
     if (v.ready.has("bkb")) return { item: "bkb" }
     if (v.ready.has("eul")) return { item: "eul" }
@@ -137,3 +147,13 @@ export const kiteVector = (
   if (len === 0) return null
   return { x: vx / len, z: vz / len }
 }
+
+/** Tango (spec/10 S5a): eat when the heal won't be wasted and no regen is running. */
+export const TANGO_HEAL = 115
+export const TANGO_DURATION = 16
+export const tangoTrigger = (o: {
+  readonly hp: number
+  readonly maxHp: number
+  readonly charges: number
+  readonly regenLeft: number
+}): boolean => o.charges > 0 && o.regenLeft <= 0 && o.maxHp - o.hp >= TANGO_HEAL
