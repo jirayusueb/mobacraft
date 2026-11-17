@@ -369,6 +369,8 @@ interface HeroState {
   lastEnemyNear: number
   /** Target for a save. */
   saveId?: string
+  /** Ranged kite in progress (hysteresis). */
+  kiting?: boolean
 }
 
 export type Intent =
@@ -2485,8 +2487,21 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           melee: heroes.find((x) => x.id === e.id)!.hero!.def.attack === "melee",
         })),
       )
-      if (v && b.cooldown > 0) {
-        stepToward(b, { x: b.x + v.x * 2, z: b.z + v.z * 2 }, 0, dt)
+      // Hysteresis (spec/09 L3): once a melee threat triggers a kite, keep backing off
+      // until the closest melee is at 95 % range, instead of stepping on every swing.
+      const meleeGap = Math.min(
+        ...enemies
+          .filter((e) => heroes.find((x) => x.id === e.id)!.hero!.def.attack === "melee")
+          .map((e) => dist(e.pos, b)),
+      )
+      if (v) h.kiting = true
+      if (h.kiting && meleeGap >= b.range * 0.95) h.kiting = false
+      if (h.kiting && b.cooldown > 0.1) {
+        const dir = v ?? {
+          x: (b.x - closestKnownEnemy(b)!.pos.x) / (meleeGap || 1),
+          z: (b.z - closestKnownEnemy(b)!.pos.z) / (meleeGap || 1),
+        }
+        stepToward(b, { x: b.x + dir.x * 2, z: b.z + dir.z * 2 }, 0, dt)
         return true
       }
       return false
