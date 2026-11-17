@@ -1971,7 +1971,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     // No creeps: hold near own outermost standing tower.
     const t = minBy(
       structList,
-      (t) => t.alive && t.type === "tower" && t.team === team && t.structure!.lane === laneId,
+      (x) => x.alive && x.type === "tower" && x.team === team && x.structure!.lane === laneId,
       (a, b) => (a.structure!.tier ?? 1) - (b.structure!.tier ?? 1),
     )
     if (t) return { x: t.x, z: t.z }
