@@ -435,3 +435,20 @@ export class AnnouncerTracker {
 export const goldK = (n: number) => `${(n / 1000).toFixed(1)}k`
 
 export const otherSide = (s: DraftSide): DraftSide => (s === "blue" ? "red" : "blue")
+
+// --- Roshan HUD ----------------------------------------------------------------------
+
+/**
+ * Roshan's HP fraction from the live unit list — `null` when he is dead or
+ * not spawned, `1` at full health. Drives the scoreboard's "Roshan 64%"
+ * readout so a pit attempt is visible even when no banner is on screen.
+ */
+export const roshanHp = <U extends { kind: string; hp?: number }>(
+  units: readonly U[],
+): number | null => {
+  for (const u of units) if (u.kind === "roshan") return u.hp ?? 1
+  return null
+}
+
+/** True while the pit is being fought (alive and below ~full health). */
+export const roshanUnderAttack = (hp: number | null): boolean => hp !== null && hp < 0.995

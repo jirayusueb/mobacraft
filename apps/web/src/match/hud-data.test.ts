@@ -9,6 +9,8 @@ import {
   noCallerAlive,
   phaseBands,
   signedK,
+  roshanHp,
+  roshanUnderAttack,
 } from "./hud-data.ts"
 
 const hero = (over: Partial<HeroLine>): HeroLine =>
@@ -201,5 +203,25 @@ describe("comms", () => {
     expect(signedK(1500)).toBe("+1.5k")
     expect(signedK(-400)).toBe("−0.4k")
     expect(signedK(10)).toBe("0")
+  })
+})
+
+describe("roshan HUD", () => {
+  test("roshanHp reads the pit boss from live units; null when dead/absent", () => {
+    expect(
+      roshanHp([
+        { kind: "creep", hp: 1 },
+        { kind: "roshan", hp: 0.64 },
+      ]),
+    ).toBeCloseTo(0.64, 9)
+    expect(roshanHp([{ kind: "creep", hp: 1 }])).toBeNull()
+    expect(roshanHp([])).toBeNull()
+  })
+
+  test("roshanUnderAttack only while alive and hurt", () => {
+    expect(roshanUnderAttack(1)).toBeFalse()
+    expect(roshanUnderAttack(0.995)).toBeFalse()
+    expect(roshanUnderAttack(0.42)).toBeTrue()
+    expect(roshanUnderAttack(null)).toBeFalse()
   })
 })
