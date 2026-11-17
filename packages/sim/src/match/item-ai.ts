@@ -166,3 +166,75 @@ export const goldFloor = (
   ruleItem: boolean,
 ): number =>
   ruleItem || (gameMinutes < BUYBACK_RESERVE_MIN && !lostTier3) ? 0 : buybackCost(level)
+
+// --- spec/10 layer 5: comeback gold + late-game slot management (S6) -------------
+
+/** Comeback bounty cap per kill (gold, split among killer + assists). */
+export const COMEBACK_CAP = 150
+/** Net-worth gap below which no comeback bounty is paid. */
+export const COMEBACK_MIN_GAP = 5000
+export const COMEBACK_RATE = 0.05
+
+/**
+ * Bonus for killing a hero of the richer team (spec/10 layer 5, tuned by the
+ * S6 balance re-gate): `clamp(0.05 × gap, 0, 150)` once the gap is ≥ 5k,
+ * split evenly among the killer and assisters (floored, deterministic).
+ */
+export const comebackShare = (killerSideNW: number, victimSideNW: number, shares: number) => {
+  const gap = victimSideNW - killerSideNW
+  const pot = gap < COMEBACK_MIN_GAP ? 0 : Math.min(COMEBACK_CAP, COMEBACK_RATE * gap)
+  return shares > 0 ? Math.floor(pot / shares) : 0
+}
+
+/** Luxury upgrades once the six slots are full (t ≥ LATE_GAME_MIN). */
+export const LATE_GAME_MIN = 20
+export const LUXURY_ITEMS: readonly string[] = ["rapier", "mkb", "bkb", "heart"]
+/** Slot-free permanent buffs (consumed on purchase; stats live on the hero). */
+export const CONSUMABLE_BUFFS = {
+  "aghs-blessing": { cost: 4200, power: 0.2, hp: 200 },
+  "moon-shard": { cost: 4000, attackSpeed: 0.3 },
+} as const
+export type ConsumableBuff = keyof typeof CONSUMABLE_BUFFS
+
+export type LateAction =
+  | { readonly kind: "sell-and-buy"; readonly sell: string; readonly buy: string }
+  | { readonly kind: "consume"; readonly buff: ConsumableBuff }
+
+/**
+ * Late-game slot decision (spec/10 layer 5). Only when main is full and the
+ * hero is rich: sell the weakest item (unified sell order) for half price to
+ * fund a luxury item it doesn't own; else eat a slot-free buff it hasn't had.
+ * `floor` is the buyback reserve that must survive the purchase.
+ */
+export const lateGameAction = (o: {
+  readonly gameMinutes: number
+  readonly main: readonly (string | null)[]
+  readonly gold: number
+  readonly floor: number
+  readonly consumed: ReadonlySet<ConsumableBuff>
+}): LateAction | null => {
+  if (o.gameMinutes < LATE_GAME_MIN || o.main.includes(null)) return null
+  const owned = o.main.filter((x): x is string => x !== null && !x.startsWith("n-"))
+  const sellOrder = owned.toSorted(
+    (a, b) => sellRank(a) - sellRank(b) || itemById(a).cost - itemById(b).cost || (a < b ? -1 : 1),
+  )
+  const weakest = sellOrder[0]
+  if (weakest && itemById(weakest).tier <= 2) {
+    const refund = Math.floor(itemById(weakest).cost / 2)
+    for (const lux of LUXURY_ITEMS) {
+      if (owned.includes(lux)) continue
+      if (o.gold + refund - itemById(lux).cost >= o.floor)
+        return { kind: "sell-and-buy", sell: weakest, buy: lux }
+    }
+  }
+  for (const buff of Object.keys(CONSUMABLE_BUFFS) as ConsumableBuff[]) {
+    if (o.consumed.has(buff)) continue
+    if (o.gold - CONSUMABLE_BUFFS[buff].cost >= o.floor) return { kind: "consume", buff }
+  }
+  return null
+}
+
+const sellRank = (id: string) => {
+  const it = itemById(id)
+  return it.tags.includes("consumable") ? 0 : it.tier
+}

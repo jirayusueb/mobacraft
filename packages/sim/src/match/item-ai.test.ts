@@ -5,7 +5,9 @@ import {
   type ThreatProfile,
   buybackCost,
   chooseItem,
+  comebackShare,
   goldFloor,
+  lateGameAction,
   scanThreats,
   threatScore,
 } from "./item-ai.ts"
@@ -138,5 +140,58 @@ describe("Manta as a counter (spec/10 S5a)", () => {
     expect(
       chooseItem({ ...v, items: [...v.items, "bkb"] }, BOOK, threat({ disablers: 3 }))?.id,
     ).toBe("manta")
+  })
+})
+
+describe("comeback gold + late-game slots (spec/10 S6)", () => {
+  test("comeback: 5 % of a ≥ 5k gap, capped at 150, split among the killers", () => {
+    expect(comebackShare(20_000, 20_000, 1)).toBe(0)
+    expect(comebackShare(30_000, 20_000, 2)).toBe(0) // killing the poorer team pays nothing
+    expect(comebackShare(20_000, 24_900, 1)).toBe(0) // below the 5k gap
+    expect(comebackShare(20_000, 25_000, 1)).toBe(150) // 5 % of 5k = 250 → cap 150
+    expect(comebackShare(10_000, 30_000, 3)).toBe(50) // cap 150 / 3
+    expect(comebackShare(10_000, 30_000, 0)).toBe(0)
+  })
+
+  const FULL = ["boots", "blade", "fang", "heart", "plate", "bow"]
+  test("nothing before minute 20 or with an empty main slot", () => {
+    const base = { main: FULL, gold: 9000, floor: 0, consumed: new Set<never>() }
+    expect(lateGameAction({ ...base, gameMinutes: 19 })).toBeNull()
+    expect(
+      lateGameAction({ ...base, gameMinutes: 30, main: [...FULL.slice(0, 5), null] }),
+    ).toBeNull()
+  })
+
+  test("sells the weakest small item (boots) to fund a luxury the hero lacks", () => {
+    const a = lateGameAction({
+      gameMinutes: 25,
+      main: FULL,
+      gold: 3500,
+      floor: 500,
+      consumed: new Set(),
+    })
+    expect(a).toEqual({ kind: "sell-and-buy", sell: "boots", buy: "mkb" })
+  })
+
+  test("respects the buyback floor; falls back to slot-free buffs when nothing to sell", () => {
+    const big = ["rapier", "mkb", "bkb", "heart", "fang", "manta"]
+    expect(
+      lateGameAction({ gameMinutes: 25, main: FULL, gold: 1000, floor: 700, consumed: new Set() }),
+    ).toBeNull()
+    expect(
+      lateGameAction({ gameMinutes: 30, main: big, gold: 5000, floor: 500, consumed: new Set() }),
+    ).toEqual({
+      kind: "consume",
+      buff: "aghs-blessing",
+    })
+    expect(
+      lateGameAction({
+        gameMinutes: 30,
+        main: big,
+        gold: 5000,
+        floor: 500,
+        consumed: new Set(["aghs-blessing"] as const),
+      }),
+    ).toEqual({ kind: "consume", buff: "moon-shard" })
   })
 })

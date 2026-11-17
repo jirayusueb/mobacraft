@@ -6,6 +6,8 @@ engine) and spec/06 (tactics). All new code lives in `@mobacraft/sim` as pure
 modules; the renderer/HUD only reads the match snapshot.
 
 Status: PASS after fresh-context review (CONCERNS → resolved below).
+Implementation: S1–S6 landed (inventory, DAG, courier, item AI, actives
+S5a/S5b, late-game + comeback); see the slice list for commits.
 
 **Scope override:** this spec supersedes spec/06's out-of-scope list for
 _buyback reserve, couriers, and neutral items_. All other spec/06 deferrals
@@ -191,11 +193,14 @@ Implementation home for every active: spec/09's `microItems` (effects) and
 - `netWorthOf = gold + Σ effective items + backpack + stash + in-transit
   courier items` (change: include all zones, not just the 6 slots).
 - **Comeback gold**: killing-blow bonus
-  `comeback = clamp(0.10 × (enemyTeamNW − ownTeamNW), 0, 400)` gold split
-  among assists, capped so a single fight cannot flip the lead by itself.
-  The spec/06 balance gate (8 AI games, 13–21 min, both sides win) is
-  **re-run after S6** — comeback gold pushes the same anti-snowball lever
-  that gate tuned.
+  `comeback = gap ≥ 5000 ? min(0.05 × gap, 150) : 0` (gap = victimTeamNW −
+  killerTeamNW), split evenly among killer + assists, so a single fight cannot
+  flip the lead by itself. **S6 re-gate (16 AI games):** the drafted 10 % / 400
+  cap stalled games to 32–34 min (both teams kept refunding each other's
+  leads); 5 % / 150 / 5k gap keeps all 16 games at 14–25 min with both sides
+  winning (11/5, identical to the pre-S6 baseline). Late-game slot actions
+  _shorten_ stalled games (seed 15: 40-min cap → 32 min without comeback
+  tuning).
 - **Late-game slot management**, at t ≥ 20 game-min with 6/6 slots and gold surplus —
   sell by the unified rule (consumables first → lowest tier → cheapest → id
   tiebreak) for the 50 % sell price to open a slot for a luxury item, or buy

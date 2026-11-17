@@ -35,8 +35,12 @@ import {
   NO_THREAT,
   THREAT_SCAN_S,
   type ThreatProfile,
+  CONSUMABLE_BUFFS,
+  type ConsumableBuff,
   chooseItem,
+  comebackShare,
   goldFloor,
+  lateGameAction,
   scanThreats,
 } from "./item-ai.ts"
 import {
@@ -359,6 +363,8 @@ interface HeroState {
   itemCd: Record<string, number>
   /** Tango charges (spec/10 S5a: slot-free starting consumable). */
   tango: number
+  /** Slot-free permanent buffs eaten (spec/10 S6). */
+  consumed: Set<ConsumableBuff>
   /** Defensive purchase already made (replaces one book item). */
   defensiveDone: boolean
   lastAction: MacroAction | null
@@ -619,12 +625,21 @@ const dist = (a: { x: number; z: number }, b: { x: number; z: number }) =>
 /** Effective multipliers from player rating and mastery. */
 const otherSide = (s: DraftSide): DraftSide => (s === "blue" ? "red" : "blue")
 const skillMul = (h: HeroState) => 0.8 + h.player.skill / 50 + h.mastery * 0.15
-const powerOf = (h: HeroState) => 1 + h.items.reduce((s, id) => s + (lookupItem(id).power ?? 0), 0)
+const buffStat = (h: HeroState, k: "power" | "hp" | "attackSpeed") =>
+  [...h.consumed].reduce(
+    (s, id) => s + ((CONSUMABLE_BUFFS[id] as Partial<Record<typeof k, number>>)[k] ?? 0),
+    0,
+  )
+const powerOf = (h: HeroState) =>
+  1 + h.items.reduce((s, id) => s + (lookupItem(id).power ?? 0), 0) + buffStat(h, "power")
 const itemSum = (h: HeroState, k: "magicResist" | "armor") =>
   h.items.reduce((s, id) => s + (lookupItem(id)[k] ?? 0), 0)
 const netWorthOf = (h: HeroState) =>
   Math.round(
-    h.gold + netWorthItems(h.inv) + h.inTransit.reduce((s, id) => s + lookupItem(id).cost, 0),
+    h.gold +
+      netWorthItems(h.inv) +
+      h.inTransit.reduce((s, id) => s + lookupItem(id).cost, 0) +
+      [...h.consumed].reduce((s, id) => s + CONSUMABLE_BUFFS[id].cost, 0),
   )
 const sideOf = (team: Team): DraftSide => TEAM_SIDE[team]
 /** Item active ready (spec/10 layer 4): owned in the effective set and off cooldown. */
@@ -1015,6 +1030,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           manaRegen: 0,
           itemCd: {},
           tango: 3,
+          consumed: new Set(),
           defensiveDone: false,
           lastAction: null,
           scores: null,
@@ -1035,12 +1051,14 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const ratio = b.hp / b.maxHp
     // Melee heroes trade range for staying power and hit harder up close.
     const melee = h.def.attack === "melee"
-    b.maxHp = (h.def.hp + h.def.hpPerLevel * lv + sum("hp")) * (melee ? 1.08 : 1)
+    b.maxHp =
+      (h.def.hp + h.def.hpPerLevel * lv + sum("hp") + buffStat(h, "hp")) * (melee ? 1.08 : 1)
     b.hp = Math.max(1, ratio * b.maxHp)
     b.damage =
       (h.def.damage + h.def.damagePerLevel * lv + sum("damage")) * skillMul(h) * (melee ? 1.08 : 1)
     b.armor = h.def.armor + lv * 0.4 + sum("armor") + (melee ? 1 : 0)
-    b.attackTime = h.def.attackTime / (1 + sum("attackSpeed") + lv * 0.02)
+    b.attackTime =
+      h.def.attackTime / (1 + sum("attackSpeed") + buffStat(h, "attackSpeed") + lv * 0.02)
     b.speed = h.def.speed + sum("speed")
     const manaRatio = h.maxMana > 0 ? h.mana / h.maxMana : 1
     h.maxMana = 220 + 32 * lv + items.reduce((s, it) => s + (it.mana ?? 0), 0)
@@ -1305,6 +1323,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         a.hero!.assists++
         grant(a, ASSIST_GOLD, KILL_XP * 0.6, "assists")
       }
+      // Comeback bounty (spec/10 layer 5): killing the richer team pays extra.
+      const winSide = sideOf(enemyTeam)
+      const share = comebackShare(
+        sideSum(winSide, netWorthOf),
+        sideSum(h.side, netWorthOf),
+        (killer ? 1 : 0) + assisters.length,
+      )
+      if (share > 0)
+        for (const x of killer ? [killer, ...assisters] : assisters) grant(x, share, 0, "kills")
       const text = killer
         ? `${heroLabel(killer)} slew ${heroLabel(target)}`
         : `${heroLabel(target)} was slain`
@@ -2058,6 +2085,37 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       threats[side] = scanThreats(spotted, all > 0 ? mag / all : 0)
     }
   }
+  /** Late-game slot management (spec/10 layer 5): sell small → luxury, or eat a buff. */
+  const lateGame = (b: Body) => {
+    const h = b.hero!
+    const act = lateGameAction({
+      gameMinutes: clock / 60,
+      main: h.inv.main,
+      gold: h.gold,
+      floor: goldFloor(h.level, clock / 60, lostT3[h.side], false),
+      consumed: h.consumed,
+    })
+    if (!act) return
+    if (act.kind === "consume") {
+      h.gold -= CONSUMABLE_BUFFS[act.buff].cost
+      h.consumed.add(act.buff)
+    } else {
+      h.gold += Math.floor(itemById(act.sell).cost / 2)
+      removeItem(h.inv, act.sell)
+      h.gold -= itemById(act.buy).cost
+      addItem(h.inv, act.buy)
+    }
+    purchases.push({
+      t: clock,
+      side: h.side,
+      heroId: h.def.id,
+      playerId: h.player.id,
+      itemId: act.kind === "consume" ? act.buff : act.buy,
+      adaptive: false,
+    })
+    h.items = effectiveItems(h.inv, clock)
+    recomputeStats(b)
+  }
   /** Buyback reserve (spec/10 layer 3); rule items ignore it. */
   const floorFor = (h: HeroState, reason: string | undefined) =>
     goldFloor(h.level, clock / 60, lostT3[h.side], reason?.startsWith("rule:") ?? false)
@@ -2072,6 +2130,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       h.items = effectiveItems(h.inv, clock)
       recomputeStats(b)
     }
+    if (atBase) lateGame(b)
     // Component-first (spec/10 layer 2): buy pieces as they become affordable,
     // then pay the recipe to combine. Net spend equals the full item cost.
     for (let guard = 0; guard < 8; guard++) {
