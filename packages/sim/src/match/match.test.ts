@@ -260,11 +260,11 @@ describe("S5b actives in live matches (spec/10)", () => {
     }
     expect(saves).toBeGreaterThan(0)
     expect(wardsPlaced).toBeGreaterThan(0)
-    const run = () => {
-      const m = createMatch(map, autoDraft(), { seed: 9, aiCoach: ["blue", "red"] })
+    const runActives = (seed: number) => {
+      const m = createMatch(map, autoDraft(), { seed, aiCoach: ["blue", "red"] })
       m.runToEnd(12 * 60)
       return JSON.stringify(m.thinkStats().actives)
     }
-    expect(run()).toBe(run())
+    expect(runActives(9)).toBe(runActives(9))
   }, 240_000)
 })
