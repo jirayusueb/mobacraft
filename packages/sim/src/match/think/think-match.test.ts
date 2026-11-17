@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import { generateMap } from "@mobacraft/map"
-import { TEAMS, aiChoose, applyDraft, createDraft, createMatch, isComplete } from "../../index.ts"
+import {
+  TEAMS,
+  aiChoose,
+  applyDraft,
+  createDraft,
+  createMatch,
+  heroDef,
+  isComplete,
+} from "../../index.ts"
 
 const map = generateMap()
 const draft = (a: number, b: number) => {
@@ -57,5 +65,34 @@ describe("hero think in the match (spec/09 acceptance)", () => {
     const b = run()
     expect(a.heroes).toEqual(b.heroes)
     expect(a.time).toBe(b.time)
+  }, 60_000)
+
+  test("ranged heroes kite smoothly: few direction reversals while fighting", () => {
+    const m = createMatch(map, draft(0, 1), { seed: 3, aiCoach: ["blue", "red"] })
+    m.setSpeed(1)
+    const prev = new Map<string, { x: number; z: number; dx: number; dz: number }>()
+    let moving = 0
+    let reversals = 0
+    while (m.time() < 12 * 60 && !m.snapshot().winner) {
+      m.advance(0.1)
+      const units = m.units()
+      for (const h of m.snapshot().heroes) {
+        if (!h.alive || h.intent !== "fight" || heroDef(h.heroId).attack !== "ranged") continue
+        const u = units.find((x) => x.id === h.id)!
+        const p = prev.get(h.id)
+        const dx = p ? u.x - p.x : 0
+        const dz = p ? u.z - p.z : 0
+        const sp = Math.hypot(dx, dz)
+        // Ignore teleports (blink/force/respawn); count real steps only.
+        if (p && sp > 0.02 && sp < 0.6) {
+          moving++
+          if (p.dx * dx + p.dz * dz < -0.5 * Math.hypot(p.dx, p.dz) * sp) reversals++
+        }
+        const keep = p && !(sp > 0.02 && sp < 0.6)
+        prev.set(h.id, { x: u.x, z: u.z, dx: keep ? p.dx : dx, dz: keep ? p.dz : dz })
+      }
+    }
+    expect(moving).toBeGreaterThan(100)
+    expect(reversals / moving).toBeLessThan(0.08)
   }, 60_000)
 })
