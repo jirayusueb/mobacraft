@@ -18,7 +18,15 @@
 import type { LaneId, MobaMap, Structure, Team, Vec2 } from "@mobacraft/map"
 import type { CreatureKind, HeroId } from "../kinds.ts"
 import { NEUTRALS_BY_CAMP } from "../kinds.ts"
-import type { FxEvent, Population, StructureStatus, Unit } from "../population.ts"
+import type {
+  CrowdDebug,
+  FxEvent,
+  Population,
+  StructureStatus,
+  SwingPhase,
+  Unit,
+} from "../population.ts"
+import { heroSwing } from "./swing-timing.ts"
 import type { DraftSide, DraftState } from "./draft.ts"
 import { type Ability, type Effect, type HeroDef, type Role, heroDef } from "./heroes.ts"
 import { itemById, missingComponents, recipeCost } from "./items.ts"
@@ -123,9 +131,9 @@ import {
   WARD_START,
   type WardSpot,
   createVisionGrid,
+  wardSpots,
   zoneFor,
 } from "./vision.ts"
-import { losWardSpots } from "./ward-spots.ts"
 import {
   ATTACK_REVEAL_RADIUS,
   ATTACK_REVEAL_TICKS,
@@ -524,6 +532,9 @@ export interface MatchOptions {
   readonly tactics?: Partial<Record<DraftSide, TeamTactics>>
 }
 
+/** Round up onto the sim tick grid (phases end on the first tick with left ≤ 0). */
+const onTick = (x: number) => Math.ceil(x / TICK - 1e-6) * TICK
+
 const polyline = (path: readonly Vec2[]) => {
   const cum = [0]
   for (let i = 1; i < path.length; i++) {
@@ -742,7 +753,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const cutTrees: TreeEvent[] = []
   const control = { blue: 0, red: 0 }
   let visionTimer = 0
-  const spots: readonly WardSpot[] = losWardSpots(map, staticFog)
+  const spots: readonly WardSpot[] = wardSpots(map)
   interface Ward {
     id: string
     side: DraftSide
@@ -1686,6 +1697,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const nav = new DynamicNav(map)
   const rings = new AttackRings()
   const ownerOf = new WeakMap<Mover, Body>()
+  /** Debug overlay capture (only while someone reads crowdDebug). */
+  let debugOn = false
+  const lastPref = new WeakMap<Mover, { x: number; z: number }>()
+  const lastMode = new WeakMap<Mover, CrowdMode>()
   const crowdWorld: CrowdWorld<Mover> = {
     neighbors: (m, r, out) => {
       for (const o of near(m, r)) if (o.alive && o.mover && o.phase! <= 0) out.push(o.mover)
@@ -2566,7 +2581,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const asMul = statMul(b, "attackSpeed")
     b.cooldown = b.attackTime / asMul
     if (!sw) return strike(b, t)
-    beginSwing(sw, t.id, swingTiming(swingClass(b), b.attackTime, asMul), b.cooldown)
+    beginSwing(
+      sw,
+      t.id,
+      swingTiming(swingClass(b), b.attackTime, asMul, b.hero ? heroSwing(b.hero.def) : undefined),
+      b.cooldown,
+    )
     b.swings = (b.swings ?? 0) + 1
     if (b.mover) {
       b.mover.pvx = 0
@@ -3062,7 +3082,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       b.z = m.z
       b.velMag = Math.hypot(m.vx, m.vz)
       if (b.velMag > 0.2 && !(b.swing && isLocked(b.swing))) b.heading = Math.atan2(m.vx, m.vz)
-      // Reset per-tick inputs.
+      // Keep this tick's inputs for the debug overlay, then reset them.
+      if (debugOn) {
+        lastPref.set(m, { x: m.pvx, z: m.pvz })
+        lastMode.set(m, m.mode)
+      }
       m.pvx = 0
       m.pvz = 0
       m.mode = "free" satisfies CrowdMode
@@ -3488,6 +3512,72 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   // --- Population + API -------------------------------------------------------------
   const heroName = (b: Body) => `${b.hero!.def.name} · ${b.hero!.player.name}`
 
+  /** Renderer-facing swing phase (spec/13 §2). */
+  const phaseOf = (b: Body): SwingPhase | null => {
+    const sw = b.swing
+    if (!sw || !b.alive) return null
+    if (sw.phase === "point") return "point"
+    if (sw.phase === "backswing") return "backswing"
+    return sw.castLock > 0 ? "cast" : null
+  }
+  const swingOf = (b: Body): Pick<Unit, "swing" | "swingT" | "swingDur"> => {
+    const cur = phaseOf(b)
+    if (!b.swing) return {}
+    if (cur === null) return { swing: null }
+    const sw = b.swing
+    // Phases end on the 0.1 s tick grid (review §3): report the real, quantised length.
+    const dur = onTick(cur === "cast" ? CAST_LOCK : sw.dur)
+    const left = onTick(Math.max(0, cur === "cast" ? sw.castLock : sw.left))
+    return {
+      swing: cur,
+      swingT: dur > 0 ? Math.min(1, Math.max(0, 1 - left / dur)) : 1,
+      swingDur: dur,
+    }
+  }
+
+  /** Debug overlay snapshot (spec/13 §4). Allocates; call only while the overlay is on. */
+  const crowdDebug = (): CrowdDebug => {
+    const rs: CrowdDebug["rings"][number][] = []
+    for (const e of rings.entries()) {
+      const t = bodyById.get(e.targetId)
+      if (!t || !t.alive) continue
+      rs.push({
+        targetId: e.targetId,
+        x: t.x,
+        z: t.z,
+        r1: e.geo.r1,
+        r2: e.geo.r2,
+        slots: e.slots.map((sl) => {
+          const h = sl.holder ? bodyById.get(sl.holder) : undefined
+          return {
+            x: t.x + sl.offset.x,
+            z: t.z + sl.offset.z,
+            ring: sl.ring,
+            ...(h && h.alive ? { holder: { x: h.x, z: h.z } } : {}),
+          }
+        }),
+      })
+    }
+    const us: CrowdDebug["units"][number][] = []
+    for (const b of bodies) {
+      const m = b.mover
+      if (!b.alive || !m) continue
+      us.push({
+        x: b.x,
+        z: b.z,
+        radius: m.radius,
+        vx: m.vx,
+        vz: m.vz,
+        pvx: lastPref.get(m)?.x ?? 0,
+        pvz: lastPref.get(m)?.z ?? 0,
+        mode: b.swing && isLocked(b.swing) ? "locked" : (lastMode.get(m) ?? "free"),
+        swing: phaseOf(b),
+        yielding: m.yieldT > 0,
+      })
+    }
+    return { rings: rs, units: us }
+  }
+
   const units = (): readonly Unit[] => {
     const out: Unit[] = []
     for (const b of bodies) {
@@ -3503,6 +3593,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         hp: b.hp / b.maxHp,
         alive: b.alive,
         attacks: b.swings ?? 0,
+        ...swingOf(b),
         ...(b.hero ? { label: heroName(b), hero: true } : {}),
       })
     }
@@ -3633,6 +3724,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     advance,
     /** Attack-phase counters (spec/09 acceptance): landed vs cancelled swings. */
     swingStats: () => ({ ...swingStats }),
+    /** Game seconds per real second right now (spec/13 review §2): 0 when paused/over. */
+    timeScale: () => (paused || winner ? 0 : speed),
+    /** Crowd/combat debug overlay (spec/13 §4); the first call turns capture on. */
+    debug: (): CrowdDebug => {
+      debugOn = true
+      return crowdDebug()
+    },
     time: () => clock,
     units,
     /** Destroy a tree at world (x, z); opens vision (spec/08 §4c). */

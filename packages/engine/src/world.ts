@@ -3,6 +3,7 @@
  * scene, camera, lights and picking. `dispose()` frees every GPU resource.
  * Internal seam of the engine: MapView (map-view.ts) is its only caller.
  */
+import { createDebugLayer } from "./creatures/debug-overlay.ts"
 import type { MobaMap } from "@mobacraft/map"
 import {
   Color,
@@ -74,6 +75,10 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
   const units = createUnitLayer(map)
   const fxLayer = createFxLayer((x, z) => map.heightAt(x, z))
   const rubble = createRubbleLayer(map)
+  const debugLayer = createDebugLayer((x, z) => map.heightAt(x, z))
+  let showDebug = false
+  /** Last debug-layer rebuild cost, ms (spec/13 acceptance: ≤ 2 ms). */
+  let debugMs = 0
   let snapshot: readonly Unit[] = []
   let structureStatus: readonly StructureStatus[] = []
   let realClock = 0
@@ -90,6 +95,7 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     units.group,
     fxLayer.group,
     rubble.group,
+    debugLayer.object,
   )
   for (const o of [terrain, water, foliage, laneProps, structures, pickables]) {
     o.traverse((c) => {
@@ -267,7 +273,9 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
       realClock += dt
       population.advance(dt)
       snapshot = population.units()
-      units.update(snapshot, camera.quaternion, showBars, dt)
+      units.update(snapshot, camera.quaternion, showBars, dt, population.timeScale?.() ?? 1)
+      const spent = debugLayer.update(showDebug, population.time(), () => population.debug?.())
+      if (spent > 0) debugMs = spent
       fxLayer.push(population.fx(), realClock)
       fxLayer.update(realClock)
       const next = population.structures?.() ?? []
@@ -298,6 +306,11 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
     setHealthBars: (on: boolean) => {
       showBars = on
     },
+    /** Crowd/combat debug overlay (spec/13 §4). */
+    setDebugOverlay: (on: boolean) => {
+      showDebug = on
+    },
+    debugMs: () => debugMs,
     render: () => post.render(),
     stats: () => ({
       calls: renderer.info.render.drawCalls,
@@ -308,6 +321,7 @@ export const createWorld = (renderer: WebGPURenderer, map: MobaMap) => {
       units.dispose()
       fxLayer.dispose()
       rubble.dispose()
+      debugLayer.dispose()
       scene.traverse((o) => {
         if (o instanceof Mesh) {
           o.geometry.dispose()

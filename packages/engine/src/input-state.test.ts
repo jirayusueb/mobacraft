@@ -17,6 +17,14 @@ describe("HeldKeys", () => {
   })
 })
 
+describe("debug overlay hotkey", () => {
+  test("backquote (spec/13 overlay toggle) never pans the camera", () => {
+    const k = new HeldKeys()
+    k.press("`")
+    expect(k.panAxes()).toEqual({ right: 0, up: 0 })
+  })
+})
+
 describe("FpsMeter", () => {
   test("reports once per window", () => {
     const m = new FpsMeter(0.5)

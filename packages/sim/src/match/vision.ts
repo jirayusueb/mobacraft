@@ -2,7 +2,7 @@
  * Vision — per-team visibility on a coarse grid (spec/06 §3c). Radius only, no line of sight.
  * Pure helpers; the match owns the grids and recomputes them every 0.5 s.
  */
-import { type MobaMap, type Team, Terrain, type Vec2 } from "@mobacraft/map"
+import type { MobaMap, Team, Vec2 } from "@mobacraft/map"
 import type { VisionZone } from "./tactics.ts"
 
 export const VISION_CELL = 2
@@ -46,11 +46,7 @@ const centroid = (ps: readonly Vec2[]): Vec2 => ({
 })
 
 /** 7 symmetric spots derived from map data: 2 runes, Roshan, 2 jungle centroids per team. */
-export const wardSpots = (
-  map: MobaMap,
-  /** Seen-area score for a ward at `p` (e.g. real LOS fog); default = open-ground proxy. */
-  coverOf?: (p: Vec2) => number,
-): readonly WardSpot[] => {
+export const wardSpots = (map: MobaMap): readonly WardSpot[] => {
   const spots: WardSpot[] = []
   for (const l of map.landmarks) {
     if (l.kind === "rune")
@@ -67,53 +63,22 @@ export const wardSpots = (
         z: rosh.position.z + (map.size / 2 - rosh.position.z) * 0.35,
       }),
     })
-  // Jungle spots: forest noise isn't mirrored, so each team's spot is chosen on its own —
-  // the most open walkable ground near each camp-group centroid (fog LOS is blocked by trees).
   for (const team of ["radiant", "dire"] as const) {
     const camps = map.camps
       .filter((c) => c.team === team)
       .toSorted((a, b) => Number(a.id.split("-").at(-1)) - Number(b.id.split("-").at(-1)))
-    ;[camps.slice(0, 4), camps.slice(4)].forEach((g, i) => {
+    const groups = [camps.slice(0, 4), camps.slice(4)]
+    groups.forEach((g, i) => {
       if (g.length === 0) return
-      // Search around each camp of the group; prefer spots watching more of the group's camps.
-      const near = (c: Vec2) =>
-        g.filter((k) => Math.hypot(k.position.x - c.x, k.position.z - c.z) <= 9).length
-      const score = coverOf ? (c: Vec2) => coverOf(c) + near(c) * 40 : undefined
-      let at = bestSpot(map, centroid(g.map((c) => c.position)), score)
-      if (score)
-        for (const k of g) {
-          const cand = bestSpot(map, k.position, score)
-          if (score(cand) > score(at)) at = cand
-        }
-      spots.push({ id: `ward-${team}-jungle-${i}`, zone: "own-jungle", owner: team, at })
+      spots.push({
+        id: `ward-${team}-jungle-${i}`,
+        zone: "own-jungle",
+        owner: team,
+        at: nearestWalkable(map, centroid(g.map((c) => c.position))),
+      })
     })
   }
   return spots
-}
-
-/** Walkable tile within 12 tiles of `p` that sees the most ground (`coverOf`, or open-ground proxy). */
-const bestSpot = (map: MobaMap, p: Vec2, coverOf?: (p: Vec2) => number): Vec2 => {
-  const proxy = (c: Vec2) => {
-    let n = 0
-    for (let dz = -8; dz <= 8; dz += 2)
-      for (let dx = -8; dx <= 8; dx += 2)
-        if (dx * dx + dz * dz <= 64 && map.terrainAt(c.x + dx, c.z + dz) !== Terrain.Forest) n++
-    return n
-  }
-  const open = coverOf ?? proxy
-  let best = nearestWalkable(map, p)
-  let bestN = open(best)
-  for (let dz = -12; dz <= 12; dz++)
-    for (let dx = -12; dx <= 12; dx++) {
-      const c = { x: Math.floor(p.x) + dx + 0.5, z: Math.floor(p.z) + dz + 0.5 }
-      if (!map.isWalkable(c.x, c.z)) continue
-      const n = open(c) - Math.hypot(dx, dz) * (coverOf ? 1 : 0.25)
-      if (n > bestN) {
-        bestN = n
-        best = c
-      }
-    }
-  return best
 }
 
 /** Zone of a spot as seen from `team` (one team's own jungle is the other's enemy jungle). */

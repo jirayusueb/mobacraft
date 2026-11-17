@@ -57,6 +57,8 @@ export interface MapViewShape {
    */
   readonly setPopulation: (population: Population | null) => void
   readonly setHealthBars: (on: boolean) => void
+  /** Crowd/combat debug overlay: rings, slots, velocities, locks (spec/13 §4). */
+  readonly setDebugOverlay: (on: boolean) => void
 }
 
 const same = (a: Picked | null, b: Picked | null) => a?.id === b?.id
@@ -319,6 +321,7 @@ const make = Effect.fnUntraced(function* (canvas: HTMLCanvasElement, map: MobaMa
       world.setPopulation(p)
     },
     setHealthBars: (on) => world.setHealthBars(on),
+    setDebugOverlay: (on) => world.setDebugOverlay(on),
     setTimeOfDay: (t) => {
       local.timeOfDay = ((t % 1) + 1) % 1
       local.phase = world.setTimeOfDay(local.timeOfDay)
