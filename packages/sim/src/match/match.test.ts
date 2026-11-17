@@ -26,6 +26,13 @@ const autoDraft = (a = 0, b = 1): DraftState => {
   return d
 }
 
+/** Determinism probe: active-item usage must be identical across runs of a seed. */
+const runActivesAt = (seed: number) => {
+  const m = createMatch(map, autoDraft(), { seed, aiCoach: ["blue", "red"] })
+  m.runToEnd(12 * 60)
+  return JSON.stringify(m.thinkStats().actives)
+}
+
 describe("heroes", () => {
   test("20 unique heroes, each with a skill and an ultimate", () => {
     expect(HEROES).toHaveLength(20)
@@ -260,11 +267,7 @@ describe("S5b actives in live matches (spec/10)", () => {
     }
     expect(saves).toBeGreaterThan(0)
     expect(wardsPlaced).toBeGreaterThan(0)
-    const runActives = (seed: number) => {
-      const m = createMatch(map, autoDraft(), { seed, aiCoach: ["blue", "red"] })
-      m.runToEnd(12 * 60)
-      return JSON.stringify(m.thinkStats().actives)
-    }
-    expect(runActives(9)).toBe(runActives(9))
+    // Determinism of active-item usage (module-level helper; see runActivesAt).
+    expect(runActivesAt(9)).toBe(runActivesAt(9))
   }, 240_000)
 })
