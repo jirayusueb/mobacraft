@@ -142,17 +142,18 @@ export const regrowTrees = (
 
 // --- shadowcasting ---------------------------------------------------------------------
 
-// Octant transforms: (row = distance along axis, col = lateral offset) → (dx, dz).
-const OCTANTS: readonly ((row: number, col: number) => [number, number])[] = [
-  (r, c) => [c, r],
-  (r, c) => [c, -r],
-  (r, c) => [-c, r],
-  (r, c) => [-c, -r],
-  (r, c) => [r, c],
-  (r, c) => [r, -c],
-  (r, c) => [-r, c],
-  (r, c) => [-r, -c],
-]
+// Octant transforms: (row = distance along axis, col = lateral offset) → (dx, dz)
+// as dx = row·XR + col·XC, dz = row·ZR + col·ZC. Coefficients instead of tuple-returning
+// closures: shadowcasting visits every cell in every source's radius each recompute,
+// and a fresh [dx, dz] per cell was the sim's largest allocation source.
+// prettier-ignore
+const OCT_XR = [0, 0, 0, 0, 1, 1, -1, -1] as const
+// prettier-ignore
+const OCT_XC = [1, 1, -1, -1, 0, 0, 0, 0] as const
+// prettier-ignore
+const OCT_ZR = [1, -1, 1, -1, 0, 0, 0, 0] as const
+// prettier-ignore
+const OCT_ZC = [0, 0, 0, 0, 1, -1, 1, -1] as const
 
 interface FogTarget {
   bits: Uint8Array
@@ -173,8 +174,8 @@ export const castVision = (
   tick: number,
 ) => {
   const { cols, band, forest, cutTrees } = staticFog
-  const ox = cellOf(cols, src).x
-  const oz = cellOf(cols, src).z
+  const ox = Math.floor(src.x / FOG_CELL)
+  const oz = Math.floor(src.z / FOG_CELL)
   const r2 = src.radius * src.radius
   const srcBand = band[oz * cols + ox] ?? 0
 
@@ -203,9 +204,14 @@ export const castVision = (
     let treeBlock = false
     let shadowBand = -1
     let newStart = 0
+    const xr = OCT_XR[oct]!
+    const xc = OCT_XC[oct]!
+    const zr = OCT_ZR[oct]!
+    const zc = OCT_ZC[oct]!
     for (let d = row; d <= src.radius && !(treeBlock || shadowBand >= 0); d++) {
       for (let col = d; col >= 0; col--) {
-        const [dx, dz] = OCTANTS[oct]!(d, col)
+        const dx = d * xr + col * xc
+        const dz = d * zr + col * zc
         const cx = ox + dx
         const cz = oz + dz
         if (cx < 0 || cz < 0 || cx >= cols || cz >= cols) continue
