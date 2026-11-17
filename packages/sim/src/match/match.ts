@@ -104,9 +104,6 @@ import {
   initiatorEngage,
   kiteVector,
   BKB_DURATION,
-  TANGO_DURATION,
-  TANGO_HEAL,
-  tangoTrigger,
   BLINK_RANGE,
   EUL_DURATION,
   FORCE_DISTANCE,
@@ -350,8 +347,6 @@ interface HeroState {
   manaRegen: number
   /** Item active cooldowns by item id. */
   itemCd: Record<string, number>
-  /** Tango charges (spec/10 S5a: slot-free starting consumable). */
-  tango: number
   /** Defensive purchase already made (replaces one book item). */
   defensiveDone: boolean
   lastAction: MacroAction | null
@@ -999,7 +994,6 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           maxMana: 0,
           manaRegen: 0,
           itemCd: {},
-          tango: 3,
           defensiveDone: false,
           lastAction: null,
           scores: null,
@@ -2248,14 +2242,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   // --- item actives & spell projectiles (spec/09) --------------------------------------
-  const activeUses: Record<string, number> = {
-    bkb: 0,
-    blink: 0,
-    force: 0,
-    eul: 0,
-    manta: 0,
-    tango: 0,
-  }
+  const activeUses: Record<string, number> = { bkb: 0, blink: 0, force: 0, eul: 0 }
   let fizzled = 0
   const useActive = (b: Body, id: string, cd: number, text: string) => {
     b.hero!.itemCd[id] = cd
@@ -2319,7 +2306,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const fightStart = near7 > 0 && clock - h.lastEnemyNear >= 10
     if (near7 > 0) h.lastEnemyNear = clock
     const readySet = new Set(
-      (["bkb", "blink", "force", "eul", "manta"] as const).filter((id) => ready(h, id)),
+      (["bkb", "blink", "force", "eul"] as const).filter((id) => ready(h, id)),
     )
     if (readySet.size === 0) return false
     const use = defensiveTrigger({
@@ -2332,7 +2319,6 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       enemiesNear: near7,
       role: h.role,
       fightStart,
-      rooted: b.st.root > 0,
     })
     const threat = closestKnownEnemy(b)
     if (use?.item === "bkb") {
@@ -2343,17 +2329,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       useActive(b, "bkb", lookupItem("bkb").active!.cooldown, "activates Black King Bar")
       return false
     }
-    if (use?.item === "manta") {
-      // Basic dispel: clears root, slow and DoTs; no invulnerability.
-      b.st.root = 0
-      b.st.slow = 0
-      b.st.slowT = 0
-      b.st.dots = []
-      useActive(b, "manta", lookupItem("manta").active!.cooldown, "dispels with Manta Style")
-      return false
-    }
     if (use?.item === "eul") {
-      b.st.root = 0
       b.st.cyclone = EUL_DURATION
       b.st.dots = []
       useActive(b, "eul", lookupItem("eul").active!.cooldown, "cyclones out with Eul's Scepter")
@@ -3194,13 +3170,6 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       h.skillCd = Math.max(0, h.skillCd - dt)
       h.ultCd = Math.max(0, h.ultCd - dt)
       h.mana = Math.min(h.maxMana, h.mana + h.manaRegen * dt)
-      // Tango (spec/10 S5a): eat a tree when the heal would not be wasted.
-      const regenLeft = b.st.hots.reduce((m, x) => (x.src === b ? Math.max(m, x.t) : m), 0)
-      if (tangoTrigger({ hp: b.hp, maxHp: b.maxHp, charges: h.tango, regenLeft })) {
-        h.tango--
-        b.st.hots.push({ hps: TANGO_HEAL / TANGO_DURATION, t: TANGO_DURATION, src: b })
-        activeUses.tango = (activeUses.tango ?? 0) + 1
-      }
       for (const id in h.itemCd) h.itemCd[id] = Math.max(0, h.itemCd[id]! - dt)
       // Fountain regen.
       if (dist(b, fountain(b.team as Team)) < 6) {

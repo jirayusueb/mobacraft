@@ -69,21 +69,13 @@ export const scanThreats = (
 }
 
 /** Counter items the scorer may add on top of the book. */
-export const COUNTER_ITEMS: readonly string[] = [
-  "mkb",
-  "bkb",
-  "force",
-  "eul",
-  "manta",
-  "nullstone",
-  "pipe",
-]
+export const COUNTER_ITEMS: readonly string[] = ["mkb", "bkb", "force", "eul", "nullstone", "pipe"]
 
 const ROLE_WEIGHT: Readonly<Record<Role, Partial<Record<string, number>>>> = {
-  carry: { mkb: 1, bkb: 1, eul: 0.2, force: 0.1, manta: 0.8, nullstone: 0.4, pipe: 0 },
+  carry: { mkb: 1, bkb: 1, eul: 0.2, force: 0.1, nullstone: 0.4, pipe: 0 },
   mid: { mkb: 0.3, bkb: 0.8, eul: 1, force: 0.4, nullstone: 0.6, pipe: 0.1 },
   offlane: { mkb: 0.2, bkb: 0.7, eul: 0.3, force: 0.4, nullstone: 0.8, pipe: 1 },
-  jungle: { mkb: 0.6, bkb: 0.8, eul: 0.3, force: 0.3, manta: 0.5, nullstone: 0.6, pipe: 0.4 },
+  jungle: { mkb: 0.6, bkb: 0.8, eul: 0.3, force: 0.3, nullstone: 0.6, pipe: 0.4 },
   support: { mkb: 0, bkb: 0.2, eul: 0.6, force: 1, nullstone: 0.5, pipe: 0.6 },
 }
 
@@ -98,9 +90,6 @@ export const threatScore = (itemId: string, role: Role, th: ThreatProfile): numb
     case "force":
     case "eul":
       return w * th.divers * 45
-    case "manta":
-      // Dispels roots/silences: wanted vs disablers, ranked below BKB.
-      return w * th.disablers * 18
     case "nullstone":
       return w * th.magicShare * 50
     case "pipe":
