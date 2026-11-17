@@ -1447,6 +1447,20 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           side: sideOf(team),
           text: `${team === "radiant" ? draft.blue.name : draft.red.name} slew Roshan${carrier?.hero ? ` — Aegis to ${carrier.hero.player.name}` : ""}`,
         })
+        if (carrier?.hero)
+          feed.push({
+            t: clock,
+            kind: "aegis",
+            side: sideOf(team),
+            text: `Aegis picked up: ${heroLabel(carrier)}`,
+          })
+        if (calls[sideOf(team)].active === "roshan")
+          feed.push({
+            t: clock,
+            kind: "roshan",
+            side: sideOf(team),
+            text: `Call paid off: Roshan down — Aegis ${carrier?.hero ? heroLabel(carrier) : "claimed"}`,
+          })
       }
       return
     }
@@ -1462,11 +1476,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if ((s.tier ?? 1) === 3) tier3Down = true
       for (const h of heroes.filter((x) => x.team === attackers))
         grant(h, TOWER_GOLD, 120, "structures")
+      const lane = s.lane ? `${s.lane[0]!.toUpperCase()}${s.lane.slice(1)}` : ""
+      const paid = calls[atkSide].active
       feed.push({
         t: clock,
         kind: "tower",
         side: atkSide,
-        text: `${atkSide === "blue" ? draft.blue.name : draft.red.name} destroyed a tier ${s.tier} tower${s.lane ? ` (${s.lane})` : ""}`,
+        text: `${atkSide === "blue" ? draft.blue.name : draft.red.name} destroyed a tier ${s.tier} tower${s.lane ? ` (${s.lane})` : ""}${paid === "push" || paid === "group" ? ` — Call paid off: ${lane} T${s.tier} tower falls` : ""}`,
       })
     } else if (target.type === "rax") {
       if (s.lane) empowered.add(`${atkSide}:${s.lane}`)
@@ -3633,6 +3649,44 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       kind: "call",
       side,
       text: `${side === "blue" ? draft.blue.tag : draft.red.tag} coach: ${CALL_TEXT[c]}`,
+    })
+    // Ping the call's objective point so the call is visible on the map (playtest fix #1).
+    const team = SIDE_TEAM[side]
+    const mine = heroes.filter((x) => x.hero!.side === side)
+    const centre = {
+      x: mine.reduce((a, b) => a + b.x, 0) / mine.length,
+      z: mine.reduce((a, b) => a + b.z, 0) / mine.length,
+    }
+    const jungle = map.camps.filter((k) => k.team === team)
+    const at =
+      c === "roshan"
+        ? roshanPos
+        : c === "push"
+          ? (structList
+              .filter((t) => t.alive && t.type === "tower" && t.team !== team && vulnerable(t))
+              .toSorted((a, b) => dist(a, centre) - dist(b, centre))[0] ?? centre)
+          : c === "safe"
+            ? (structList.find((t) => t.alive && t.type === "ancient" && t.team === team) ?? centre)
+            : c === "group"
+              ? centre
+              : jungle.length
+                ? {
+                    x: jungle.reduce((a, k) => a + k.position.x, 0) / jungle.length,
+                    z: jungle.reduce((a, k) => a + k.position.z, 0) / jungle.length,
+                  }
+                : centre
+    fx({ t: clock, kind: "aoe", at, radius: 1.2, team, style: "nova" })
+    // Acknowledge every accepted call in comms (the relay only logs when a caller is alive).
+    const iglName =
+      heroes.find((x) => x.hero!.player.id === tac[side].igl)?.hero?.player.name ?? "IGL"
+    comms.push({
+      t: clock,
+      side,
+      from: "coach",
+      caller: iglName,
+      text: `Coach → ${iglName} (IGL): ${CALL_TEXT[c]}`,
+      followers: 0,
+      total: 5,
     })
     for (const h of heroes) if (h.hero!.side === side) h.hero!.followCoach = false
     if (!callerOf(side))
