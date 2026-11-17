@@ -22,6 +22,15 @@ import type { FxEvent, Population, StructureStatus, Unit } from "../population.t
 import type { DraftSide, DraftState } from "./draft.ts"
 import { type Ability, type Effect, type HeroDef, type Role, heroDef } from "./heroes.ts"
 import { itemById, missingComponents, recipeCost } from "./items.ts"
+import { ITEM_RULES, type PurchaseView } from "./builds.ts"
+import {
+  NO_THREAT,
+  THREAT_SCAN_S,
+  type ThreatProfile,
+  chooseItem,
+  goldFloor,
+  scanThreats,
+} from "./item-ai.ts"
 import {
   BACKPACK_SLOTS,
   MAIN_SLOTS,
@@ -606,6 +615,7 @@ const emptySources = (): Record<GoldSource, number> => ({
 })
 const slotLane = (h: HeroState): LaneId | null => laneOfSlot(h.slot, h.side)
 /** Ranged non-carries deal mostly ability (magic) damage — adaptive-item draft heuristic. */
+const ALL_RULES: ReadonlySet<string> = new Set(ITEM_RULES.map((r) => r.id))
 const MAGIC_HEAVY = (id: string) => {
   const d = heroDef(id)
   return d.attack === "ranged" && !d.roles.includes("carry")
@@ -641,6 +651,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   let firstBlood = false
   const kills = { blue: 0, red: 0 }
   const towersDown = { blue: 0, red: 0 } // towers *destroyed by* side
+  /** Side has lost a Tier-3 tower (buyback reserve trigger, spec/10 layer 3). */
+  const lostT3 = { blue: false, red: false }
+  /** Visible threat profile per team, rescanned every THREAT_SCAN_S (spec/10 layer 3). */
+  const threats: Record<DraftSide, ThreatProfile> = { blue: NO_THREAT, red: NO_THREAT }
+  let nextThreatScan = 0
   const calls = {
     blue: { active: null as CoachCall | null, remaining: 0, cooldown: 0 },
     red: { active: null as CoachCall | null, remaining: 0, cooldown: 0 },
@@ -1326,6 +1341,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     const atkSide = sideOf(attackers)
     if (target.type === "tower") {
       towersDown[atkSide]++
+      if (s.tier === 3) lostT3[otherSide(atkSide)] = true
       if ((s.tier ?? 1) === 1) tier1Down++
       if ((s.tier ?? 1) === 3) tier3Down = true
       for (const h of heroes.filter((x) => x.team === attackers))
@@ -1907,7 +1923,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   // --- next purchase (build preset + adaptive rule) ---------------------------------------
-  const nextItemOf = (h: HeroState): { id: string; adaptive: boolean } | null => {
+  const nextItemOf = (
+    h: HeroState,
+  ): { id: string; adaptive: boolean; fromBook?: boolean; reason?: string } | null => {
     if (countItems(h.inv) >= MAIN_SLOTS + BACKPACK_SLOTS) return null
     const pt = ptac(h)
     if (pt.adaptive && !h.adaptiveDone && countItems(h.inv) >= 1) {
@@ -1931,9 +1949,59 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           h.items,
         )
     if (def) return { id: def, adaptive: false }
-    const id = buildById(pt.build).items[h.buildIdx]
-    return id ? { id, adaptive: false } : null
+    const book = buildById(pt.build).items
+    const choice = chooseItem(purchaseView(h), book, threats[h.side])
+    if (!choice) return null
+    // Book cursor only advances for book items; rule/threat items are extras.
+    return { id: choice.id, adaptive: false, fromBook: choice.fromBook, reason: choice.reason }
   }
+  /** Inputs for the item AI (spec/10 layer 3) — only data the team can know. */
+  const purchaseView = (h: HeroState): PurchaseView => {
+    const enemy = otherSide(h.side)
+    const total = h.taken.magic + h.taken.physical
+    const enemyIds = draft.picks[enemy].map((p) => p.heroId)
+    return {
+      heroId: h.def.id,
+      role: h.role,
+      isCarry: h.role === "carry",
+      isPipeBuyer: h.role === "offlane",
+      gold: h.gold,
+      items: allItems(h.inv),
+      bookIndex: h.buildIdx,
+      enemyHeroIds: enemyIds,
+      enemyMagicShare:
+        total >= 800
+          ? h.taken.magic / total
+          : enemyIds.filter(MAGIC_HEAVY).length / Math.max(1, enemyIds.length),
+      losingBase: lostT3[h.side],
+      netWorthDeficit: sideSum(enemy, netWorthOf) - sideSum(h.side, netWorthOf),
+      teamHasPipe: heroes.some(
+        (x) => x.hero!.side === h.side && allItems(x.hero!.inv).includes("pipe"),
+      ),
+      followsRules: true,
+      enabledRules: ALL_RULES,
+    }
+  }
+  /** Rescan what each team has *seen* of the enemy (fog-respecting). */
+  const scanTeamThreats = () => {
+    for (const side of ["blue", "red"] as const) {
+      const spotted: { heroId: string; items: readonly string[] }[] = []
+      for (const e of heroes) {
+        if (e.hero!.side === side) continue
+        const live = knowledge[side].visible(e.id)
+        const ghost = knowledge[side].ghost(e.id)
+        if (live) spotted.push({ heroId: e.hero!.def.id, items: live.items })
+        else if (ghost) spotted.push({ heroId: e.hero!.def.id, items: ghost.itemsAtSeen })
+      }
+      const mine = heroes.filter((x) => x.hero!.side === side)
+      const mag = mine.reduce((a, x) => a + x.hero!.taken.magic, 0)
+      const all = mine.reduce((a, x) => a + x.hero!.taken.magic + x.hero!.taken.physical, 0)
+      threats[side] = scanThreats(spotted, all > 0 ? mag / all : 0)
+    }
+  }
+  /** Buyback reserve (spec/10 layer 3); rule items ignore it. */
+  const floorFor = (h: HeroState, reason: string | undefined) =>
+    goldFloor(h.level, clock / 60, lostT3[h.side], reason?.startsWith("rule:") ?? false)
   /**
    * Buy toward the next item. At base items land in the inventory; away from
    * base they land in the stash and the courier delivers them (spec/10 S3).
@@ -1954,7 +2022,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       if (missing.length > 0) {
         const piece = missing[0]!
         const pieceCost = itemById(piece).cost
-        if (h.gold < pieceCost) return
+        if (h.gold - floorFor(h, next.reason) < pieceCost) return
         if (!atBase && !h.inv.stash.includes(null)) return
         h.gold -= pieceCost
         place(piece)
@@ -1963,13 +2031,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         continue // same target next guard iteration
       }
       const recipe = recipeCost(next.id)
-      if (h.gold < recipe) return
+      if (h.gold - floorFor(h, next.reason) < recipe) return
       h.gold -= recipe
       for (const c of itemById(next.id).components) removeItem(h.inv, c)
       place(next.id)
       h.items = effectiveItems(h.inv, clock)
       if (next.adaptive) h.adaptiveDone = true
-      else h.buildIdx++
+      else if (next.fromBook !== false) h.buildIdx++
       if (["bkb", "blink", "force", "eul"].includes(next.id)) h.defensiveDone = true
       purchases.push({
         t: clock,
@@ -3201,6 +3269,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     crowdTick(dt)
 
     tickCouriers(dt)
+    if (clock >= nextThreatScan) {
+      scanTeamThreats()
+      nextThreatScan = clock + THREAT_SCAN_S
+    }
 
     // AI coaches
     for (const side of aiSides) aiCoach(side)
