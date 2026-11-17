@@ -85,6 +85,32 @@ export const creepTemplate = (
 
 // --- object pool ---------------------------------------------------------------------
 
+/**
+ * Generic free-list pool for records the caller resets in place (the match pools
+ * its full creep bodies with this). `created` stays flat once the pool is warm.
+ */
+export class RecyclePool<T> {
+  readonly #free: T[] = []
+  created = 0
+  reused = 0
+  constructor(private readonly make: () => T) {}
+  acquire(): T {
+    const x = this.#free.pop()
+    if (x !== undefined) {
+      this.reused++
+      return x
+    }
+    this.created++
+    return this.make()
+  }
+  release(x: T) {
+    this.#free.push(x)
+  }
+  get available() {
+    return this.#free.length
+  }
+}
+
 export interface PooledCreep {
   id: number
   active: boolean
@@ -102,7 +128,7 @@ export interface PooledCreep {
 
 const BASE_HP: Record<CreepRole, number> = { melee: 550, ranged: 300, siege: 875 }
 const BASE_DMG: Record<CreepRole, number> = { melee: 21, ranged: 24, siege: 40 }
-const TEMPLATE_MUL: Record<CreepTemplate, { hp: number; dmg: number }> = {
+export const TEMPLATE_MUL: Readonly<Record<CreepTemplate, { hp: number; dmg: number }>> = {
   normal: { hp: 1, dmg: 1 },
   super: { hp: 1.5, dmg: 1.6 },
   mega: { hp: 2.2, dmg: 2.4 },

@@ -154,6 +154,8 @@ export const INTENT_LABEL: Record<string, string> = {
   ward: "Ward",
   shop: "Shop",
   save: "Save",
+  stack: "Stack",
+  rune: "Rune",
   dead: "Dead",
 }
 
@@ -185,6 +187,7 @@ export const PHASE_LABEL: Record<string, string> = {
 /** spec/06 gold sources (MatchSnapshot.sources). */
 export const SOURCE_LABEL: Record<string, string> = {
   passive: "Passive",
+  runes: "Runes",
   comeback: "Comeback",
   creeps: "Creeps",
   neutrals: "Neutrals",

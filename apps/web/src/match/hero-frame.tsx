@@ -1,4 +1,4 @@
-import { MAX_LEVEL, RESPAWN_BASE, RESPAWN_PER_LEVEL } from "@mobacraft/sim"
+import { MAX_LEVEL } from "@mobacraft/sim"
 /** Hero frames — one compact card per hero down each side of the screen. */
 import { type HeroLine, MAX_ITEMS } from "@mobacraft/sim"
 import { cn } from "@mobacraft/ui"
@@ -9,9 +9,8 @@ import { ItemSlot, itemName } from "./item-icon.tsx"
 import { HeroGem } from "./ui.tsx"
 
 /** Sim XP_CURVE length; used only to draw the level ring's fill. */
-/** Sim respawn rule (6 s + 2.2 s per level); only used to scale the overlay's progress line. */
-const respawnSpan = (h: HeroLine) =>
-  Math.max(h.respawnIn, RESPAWN_BASE + h.level * RESPAWN_PER_LEVEL)
+/** Full duration of this death (spec/12 curve + modifiers) for the overlay's progress line. */
+const respawnSpan = (h: HeroLine) => Math.max(h.respawnIn, h.respawnTotal ?? 0)
 /** Ultimates unlock at this level in the sim. No cooldown data reaches the HUD. */
 const ULT_LEVEL = 6
 
@@ -108,15 +107,17 @@ const HeroFrame = ({
       className={cn(
         "relative flex w-full items-center gap-2 overflow-hidden rounded-xl border border-white/10 bg-neutral-950/60 p-1.5 pr-2 text-left outline-none backdrop-blur-xl transition hover:bg-neutral-900/75 focus-visible:ring-2 focus-visible:ring-sky-300/90 motion-reduce:transition-none",
         h.aegis && "border-amber-300/40",
+        h.protected && "ring-1 ring-sky-200/40",
       )}
       aria-label={[
         `${h.playerName}, ${h.heroName}, level ${h.level}`,
         `${h.kills} kills ${h.deaths} deaths ${h.assists} assists`,
         dead
-          ? `dead, respawning in ${Math.ceil(h.respawnIn)} seconds`
+          ? `dead, respawning in ${Math.ceil(h.respawnIn)} seconds${h.buyback?.ready ? `, buyback ready (${h.buyback.cost} gold)` : ""}`
           : `${Math.round(h.hp * 100)}% health, ${INTENT_LABEL[h.intent] ?? h.intent}`,
         ult ? "ultimate unlocked" : "",
         h.aegis ? "holds the Aegis" : "",
+        h.protected ? "spawn protected" : "",
         h.igl ? "in-game leader" : "",
         h.following === false ? "freelancing, ignoring the current call" : "",
         `${goldK(h.netWorth ?? h.gold)} net worth`,
@@ -253,7 +254,30 @@ const HeroFrame = ({
           aria-hidden
         >
           <Skull className="size-3.5 text-white/45" />
-          <span className="text-[10px] tracking-wider text-white/50 uppercase">Respawn</span>
+          <span className="flex flex-col items-end leading-tight">
+            <span className="text-[10px] tracking-wider text-white/50 uppercase">Respawn</span>
+            {h.buyback ? (
+              <span
+                className={cn(
+                  "text-[8.5px] tabular-nums",
+                  h.buyback.ready
+                    ? "text-amber-200/90"
+                    : h.buyback.cooldown > 0
+                      ? "text-white/35"
+                      : "text-white/30 line-through",
+                )}
+                title={
+                  h.buyback.cooldown > 0
+                    ? `Buyback on cooldown: ${Math.ceil(h.buyback.cooldown)} s`
+                    : `Buyback costs ${h.buyback.cost} gold`
+                }
+              >
+                {h.buyback.cooldown > 0
+                  ? `BB ${Math.ceil(h.buyback.cooldown)}s`
+                  : `BB ${goldK(h.buyback.cost)}`}
+              </span>
+            ) : null}
+          </span>
           <span className="w-6 text-right font-mono text-lg leading-none font-bold tabular-nums text-white">
             {Math.ceil(h.respawnIn)}
           </span>

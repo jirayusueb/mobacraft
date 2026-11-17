@@ -12,7 +12,6 @@ import {
   type MatchSnapshot,
   PHASES,
   type Phase,
-  ROSHAN_RESPAWN,
 } from "@mobacraft/sim"
 import { ANNOUNCER } from "../strings.ts"
 
@@ -191,10 +190,16 @@ export const aegisCarrier = (f: FeedEntry, heroes: readonly HeroLine[]) => {
 // --- Roshan --------------------------------------------------------------------------
 
 /**
- * Roshan respawn in game seconds. Mirrors the sim's ROSHAN_RESPAWN (not exported);
- * the HUD shows it as an approximate "~" time, never as exact.
+ * Roshan readout from the public respawn window (spec/12 §5): the exact time is
+ * hidden, so the HUD shows "8:00–11:00"-style windows and a "maybe up" state.
  */
-export const ROSHAN_RESPAWN_APPROX = ROSHAN_RESPAWN
+export const roshanText = (snap: MatchSnapshot, clock: (s: number) => string): string => {
+  const w = snap.roshanWindow
+  if (w.state === "alive") return "Roshan up"
+  if (w.state === "maybe")
+    return `Roshan maybe up · by ${clock(Math.max(0, w.latest! - snap.time))}`
+  return `Roshan ${clock(Math.max(0, w.earliest! - snap.time))}–${clock(Math.max(0, w.latest! - snap.time))}`
+}
 
 export const roshanDownAt = (feed: readonly FeedEntry[]) =>
   feed.findLast((f) => f.kind === "roshan")?.t ?? null

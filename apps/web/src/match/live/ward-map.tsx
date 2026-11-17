@@ -163,11 +163,30 @@ export const WardMap = ({
         >
           {wards.map((w) => (
             <g key={w.id}>
-              <title>{`Ward · ${Math.ceil(w.expiresIn)} s left`}</title>
+              <title>{`${w.kind === "sentry" ? "Sentry" : "Ward"} · ${Math.ceil(w.expiresIn)} s left`}</title>
               <circle cx={w.x} cy={w.z} r={9} className="fill-radiant/10" />
               <path
                 d={`M${w.x},${w.z - S / 40}L${w.x + S / 55},${w.z}L${w.x},${w.z + S / 40}L${w.x - S / 55},${w.z}Z`}
-                className="fill-amber-200"
+                className={w.kind === "sentry" ? "fill-sky-300" : "fill-amber-200"}
+                stroke="black"
+                strokeWidth={S / 260}
+              />
+            </g>
+          ))}
+          {snap.runes.map((r) => (
+            <g key={r.id}>
+              <title>{r.type ? `${r.type.replace("-", " ")} rune` : `${r.kind} rune`}</title>
+              <circle
+                cx={r.x}
+                cy={r.z}
+                r={S / 70}
+                className={
+                  r.kind === "power"
+                    ? "fill-fuchsia-300"
+                    : r.kind === "bounty"
+                      ? "fill-yellow-300"
+                      : "fill-teal-200"
+                }
                 stroke="black"
                 strokeWidth={S / 260}
               />

@@ -2,14 +2,7 @@
 import type { DraftSide, DraftState, MatchSnapshot, Unit } from "@mobacraft/sim"
 import { Panel, cn } from "@mobacraft/ui"
 import { Skull, TrendingUp } from "lucide-react"
-import {
-  ROSHAN_RESPAWN_APPROX,
-  goldK,
-  otherSide,
-  roshanDownAt,
-  roshanHp,
-  roshanUnderAttack,
-} from "./hud-data.ts"
+import { goldK, otherSide, roshanHp, roshanText, roshanUnderAttack } from "./hud-data.ts"
 import { TeamCrest, clockText } from "./ui.tsx"
 
 const TOWERS_PER_SIDE = 11
@@ -50,10 +43,8 @@ export const Scoreboard = ({
   const theirTeam = you === "blue" ? draft.red : draft.blue
   const lead = snap.gold[you] - snap.gold[them]
   const leader = Math.abs(lead) < 100 ? null : lead > 0 ? you : them
-  const downAt = roshanDownAt(snap.feed)
   const hp = roshanHp(units)
   const fighting = roshanUnderAttack(hp)
-  const back = downAt === null ? 0 : Math.max(0, downAt + ROSHAN_RESPAWN_APPROX - snap.time)
 
   return (
     <div className="absolute top-4 left-1/2 flex -translate-x-1/2 items-stretch gap-2">
@@ -134,18 +125,18 @@ export const Scoreboard = ({
         <span
           className={cn(
             "flex items-center gap-1.5",
-            fighting ? "text-amber-200" : snap.roshanAlive ? "text-violet-300" : "text-white/40",
+            fighting
+              ? "text-amber-200"
+              : snap.roshanWindow.state === "alive"
+                ? "text-violet-300"
+                : snap.roshanWindow.state === "maybe"
+                  ? "text-violet-200/70"
+                  : "text-white/40",
           )}
           aria-live="polite"
         >
           <Skull className="size-3.5" aria-hidden />
-          {fighting
-            ? `Roshan ${Math.round((hp ?? 0) * 100)}%`
-            : snap.roshanAlive
-              ? "Roshan up"
-              : back > 0
-                ? `Roshan ~${clockText(back)}`
-                : "Roshan due"}
+          {fighting ? `Roshan ${Math.round((hp ?? 0) * 100)}%` : roshanText(snap, clockText)}
         </span>
       </Panel>
     </div>

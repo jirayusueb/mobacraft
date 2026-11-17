@@ -85,7 +85,8 @@ export interface BrainCtx<B extends BrainBody> {
   /** Team objective point (next vulnerable enemy structure), if any. */
   objective(side: DraftSide): Vec2 | null
   isCore(b: B): boolean
-  roshanUp(): boolean
+  /** Fog-safe belief that Roshan is up for this side (spec/12 §5). */
+  roshanUp(side: DraftSide): boolean
   nextItemCost(b: B): number | null
   manaCost(b: B, isUlt: boolean): number
   stall(): boolean
@@ -417,7 +418,7 @@ export const createBrain = <B extends BrainBody>(ctx: BrainCtx<B>) => {
       farmPriority: beh.farm,
       slot: h.slot,
       isCore: ctx.isCore(b),
-      roshanUp: ctx.roshanUp(),
+      roshanUp: ctx.roshanUp(side),
       alliesAlive: allies.length,
       enemiesDead: enemiesOf(side).filter((e) => !e.alive).length,
       stall: ctx.stall(),

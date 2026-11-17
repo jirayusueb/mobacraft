@@ -193,13 +193,59 @@ whole cycle.
    cadences, alarms, Roshan staying within its window with no leak in the public
    view, and tree regrowth hooks and retry.
 5. **S5 Namespace export and gate.** `make test` green.
-6. **S6 (follow-up, after `main` WIP lands)** — wire into `match.ts`, add HUD
-   respawn/buyback/Roshan-window readouts, re-run the spec/06 balance gate.
+6. **S6 Match integration (done).** `match.ts` drives every system:
+   - **Time.** Durations run in Dota seconds ÷ `DOTA_TIME_SCALE` (2). Creep
+     waves keep the 30 s match-clock metronome, and wave k leaves at 1 + 30k s,
+     exactly once (guarded by wave index). Camp checks, runes and Roshan run on
+     the Dota clock, so a camp check happens every 30 match seconds.
+   - **Hero life.** `respawnSeconds(level)` uses `dotaLevel`, giving 6 s → 50 s
+     of match time. Bonecaller's ultimate is the Reaper's Scythe analogue: a
+     kill within 1.5 s of the hit adds respawn time. Spawn protection breaks on
+     the first move, cast, item use or TP. Cooldowns tick while dead. Once a
+     second while dead the hero runs its dead brain: it shops (respecting the
+     buyback floor), sorts the backpack, scores buyback, and plans a TP to the
+     friendly tower nearest the objective (only when defending, fighting or
+     after laning).
+   - **Buyback.** The reserve floor is now `buybackCost(netWorth)`. The base
+     defense branch requires at least 2 visible enemies at our base, and the
+     fight branch requires the game to be past laning with at least 2 allies
+     engaged. The feed explains each buyback.
+   - **Waves.** Wave composition and the super/mega templates come from
+     `BarracksState`. Creep bodies are pooled through `RecyclePool`, with a
+     30 s quarantine before reuse so stale references are cleared. Reuse is
+     more than 3× creation in a full game.
+   - **Camps.** Camps start empty and spawn at the first check. Spawn boxes
+     block on heroes, creeps, neutrals and wards. Supports pull large or
+     ancient camps at Dota :53, and pulled neutrals chase past their leash for
+     2.5 s to clear the box. The sentry stock is separate from observers.
+     Supports block an enemy large camp, and dewards are inferred fog-safe.
+   - **Runes.** Bounty runes go to both jungles, power runes to a seeded river
+     spot (on its own RNG stream), and wisdom runes to both rune spots.
+     Supports walk to runes on the 15 s alarm. Rune gold is tracked as the
+     `runes` source.
+   - **Roshan.** `RoshanTimer` has its own RNG stream. The AI reads it only
+     through `roshanBelief(side)`: the pit when it is lit, otherwise the CDF and
+     the time of our last empty-pit check. The snapshot carries
+     `roshanWindow`, never the exact respawn time.
+   - **Trees.** Trees regrow through `TreeRegrowth` 3 Dota minutes after being
+     cut, restoring the fog blocker and the nav cell, and retry while the cell
+     is occupied.
+   - **HUD.** Hero frames show the death progress from `respawnTotal`, the
+     buyback price or cooldown, and a spawn-protection ring. The scoreboard
+     shows the Roshan window ("Roshan 3:46–5:16", then "maybe up"). The
+     minimap shows runes and sentries in a different colour, and the feed has
+     buyback and rune icons.
+   - **Evidence.** `make test` passes (323 tests, including
+     `tempo-match.test.ts`). The balance gate gives 6 seeds of 13.9–27.5 min
+     with both sides winning. In the browser, the full flow draft → match →
+     late game shows no errors. Screenshots are
+     `docs/design/respawn-hud.jpg` and `docs/design/respawn-roshan-window.jpg`.
 
 ## Gate
 
-Verdict **PASS** for S1–S5, backed by `make test` green in the worktree and the
-unit tests named above. S6 is explicitly deferred and does not block this gate.
+Verdict **PASS** for S1–S6. Evidence: `make test` passes, the match-level tempo
+tests pass, the 6-seed balance gate passes, and a browser playthrough is
+recorded in S6 above.
 
 ## Review resolutions (fresh-context review)
 

@@ -8,6 +8,7 @@ import { HeroGem } from "../ui.tsx"
 /** Opacity ramp per source so one team colour carries the whole stack. */
 const SOURCE_SHADE: Record<GoldSource, string> = {
   passive: "opacity-30",
+  runes: "opacity-45",
   comeback: "opacity-50",
   creeps: "opacity-95",
   neutrals: "opacity-70",

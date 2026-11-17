@@ -12,6 +12,8 @@ import {
   type LucideIcon,
   Megaphone,
   ShieldPlus,
+  Coins,
+  Sparkles,
   Skull,
   TowerControl,
 } from "lucide-react"
@@ -28,6 +30,8 @@ const KIND_ICON: Partial<Record<FeedEntry["kind"], LucideIcon>> = {
   phase: Hourglass,
   ward: EyeOff,
   swap: ArrowLeftRight,
+  buyback: Coins,
+  rune: Sparkles,
 }
 
 const Who = ({ h }: { h: HeroLine }) => (

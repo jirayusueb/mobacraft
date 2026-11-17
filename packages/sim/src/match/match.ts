@@ -148,19 +148,19 @@ import {
   ATTACK_REVEAL_RADIUS,
   ATTACK_REVEAL_TICKS,
   Bits,
-  TREE_REGROW_TICKS,
-  type TreeEvent,
+  FOG_CELL,
   createStaticFog,
   createTeamFog,
   destroyTree,
   fogSnapshot,
   isVisibleToTeam,
   recomputeFog,
-  regrowTrees,
   sourceRadius,
   type VisionSource,
 } from "./fog.ts"
 import { TeamKnowledge } from "./knowledge.ts"
+import { DOTA_TIME_SCALE } from "./archetypes.ts"
+import * as tempo from "./respawn/index.ts"
 
 /** How long before the time cap the tiebreak warning fires (game seconds). */
 export const TIME_WARNING_LEAD = 120
@@ -179,6 +179,7 @@ export const LATE_AT = 15 * 60
 export const ANTI_STALL_AT = 22 * 60
 
 export type GoldSource =
+  | "runes"
   | "passive"
   | "comeback"
   | "creeps"
@@ -190,6 +191,7 @@ export type GoldSource =
   | "wards"
 export const GOLD_SOURCES: readonly GoldSource[] = [
   "passive",
+  "runes",
   "comeback",
   "creeps",
   "neutrals",
@@ -236,11 +238,30 @@ const NEUTRAL_GOLD = 80 // was 55: jungle camps must out-earn lane creeps
 const NEUTRAL_XP = 95 // was 70
 const ROSHAN_GOLD = 200
 const XP_RANGE = 9
-export const RESPAWN_BASE = 6
-export const RESPAWN_PER_LEVEL = 2.2
-const WAVE_INTERVAL = 30
-const CAMP_RESPAWN = 48 // was 60: a dedicated jungler gets a clear-respawn loop
-export const ROSHAN_RESPAWN = 240
+/**
+ * Respawn & tempo (spec/12). The tempo modules speak Dota seconds; the match
+ * clock is compressed by DOTA_TIME_SCALE, so durations divide by it here.
+ * Creep waves and camp checks stay on the match clock (spec/12 §S6).
+ */
+const DOTA = DOTA_TIME_SCALE
+/** Match-clock respawn seconds for a hero level (our 1..MAX_LEVEL → Dota 1..30). */
+export const respawnSeconds = (level: number, mods: readonly tempo.RespawnModifier[] = []) =>
+  tempo.respawnTime(tempo.dotaLevel(level, MAX_LEVEL), mods) / DOTA
+/** Match-clock Roshan window after a kill (Dota 8–11 min). */
+export const ROSHAN_WINDOW = [
+  tempo.ROSHAN_MIN_RESPAWN / DOTA,
+  tempo.ROSHAN_MAX_RESPAWN / DOTA,
+] as const
+/** Spawn-box half extent around a camp centre (tiles). */
+const CAMP_BOX = 2.5
+/** Pulled neutrals keep chasing this long regardless of leash (lets stacks clear the box). */
+const PULL_CHASE = 2.5
+/** TP: channel and cooldown (match seconds). */
+const TP_CHANNEL = tempo.TP_CHANNEL / DOTA
+const TP_COOLDOWN = 80 / DOTA
+const SENTRY_RECHARGE = 120
+/** Ultimates that add respawn time on the kill (Reaper's Scythe analogue). */
+const RESPAWN_ULTS: Readonly<Record<string, true>> = { bonecaller: true }
 
 type UnitType = "hero" | "creep" | "neutral" | "roshan" | "tower" | "ancient" | "rax"
 
@@ -332,6 +353,10 @@ interface Body {
   /** Avoidance priority / separation mass (hero 2, others 1). */
   priority?: number
   mass?: number
+  /** Neutral pulled for a stack: chase past the leash until this clock (spec/12 §4). */
+  pullUntil?: number
+  /** Structures: clock of the last damage taken (base-defense buyback trigger). */
+  hurtAt?: number
 }
 
 interface HeroState {
@@ -360,6 +385,23 @@ interface HeroState {
   skillCd: number
   ultCd: number
   respawn: number
+  /** Full respawn duration of the current death (HUD progress). */
+  respawnTotal: number
+  /** spec/12 §2 buyback bookkeeping (Dota seconds inside). */
+  bb: tempo.BuybackState
+  /** Clock until which fountain protection holds (0 = none). */
+  spawnGuard: number
+  spawnAt: Vec2 | null
+  /** Respawn-extending ultimate hit (Reaper's Scythe analogue): applies if death comes before `until`. */
+  scythe?: { rank: 1 | 2 | 3; until: number }
+  /** Sentry mission: block an enemy camp or deward one of ours (spec/12 §4). */
+  wardJob?: { kind: "block" | "deward"; campId: string; at: Vec2 }
+  /** Planned stack pull this Dota minute (spec/12 §4). */
+  stackJob?: { campId: string; minute: number; pulled: boolean }
+  /** Teleport: cooldown left, planned destination and arrival time. */
+  tpCd: number
+  tpTo: Vec2 | null
+  tpAt: number
   aegis: boolean
   kills: number
   deaths: number
@@ -408,6 +450,8 @@ export type Intent =
   | "ward"
   | "shop"
   | "save"
+  | "stack"
+  | "rune"
   | "dead"
 
 export interface HeroLine {
@@ -422,6 +466,12 @@ export interface HeroLine {
   readonly hp: number
   readonly alive: boolean
   readonly respawnIn: number
+  /** Full duration of the current death (0 while alive). */
+  readonly respawnTotal: number
+  /** spec/12 buyback: gold cost now, seconds of cooldown left, affordable+ready. */
+  readonly buyback: { readonly cost: number; readonly cooldown: number; readonly ready: boolean }
+  /** Fountain spawn protection active. */
+  readonly protected: boolean
   readonly kills: number
   readonly deaths: number
   readonly assists: number
@@ -472,12 +522,23 @@ export interface CommsEntry {
   readonly total: number
 }
 
+export interface RuneLine {
+  readonly id: string
+  readonly kind: tempo.RuneKind
+  /** Power rune type; null for bounty/wisdom. */
+  readonly type: tempo.PowerRuneType | null
+  readonly x: number
+  readonly z: number
+}
+
 export interface WardLine {
   readonly id: string
   readonly side: DraftSide
   readonly x: number
   readonly z: number
   readonly expiresIn: number
+  /** Observer (vision) or sentry (camp block / true sight). */
+  readonly kind: "observer" | "sentry"
 }
 
 export interface HistorySample {
@@ -512,6 +573,8 @@ export interface FeedEntry {
     | "swap"
     | "time-warning"
     | "item"
+    | "buyback"
+    | "rune"
   readonly side: DraftSide | "neutral"
   readonly text: string
 }
@@ -539,7 +602,16 @@ export interface MatchSnapshot {
       { readonly active: CoachCall | null; readonly remaining: number; readonly cooldown: number }
     >
   >
+  /** Public Roshan belief: false only while he is certainly dead (spec/12 §5). */
   readonly roshanAlive: boolean
+  /** Roshan's public respawn window in match seconds; never the exact time. */
+  readonly roshanWindow: {
+    readonly state: tempo.RoshanPublicState
+    readonly earliest: number | null
+    readonly latest: number | null
+  }
+  /** Runes on the map (spec/12 §5). */
+  readonly runes: readonly RuneLine[]
   readonly winner: DraftSide | null
   readonly phase: Phase
   /** Game time each phase started (laning = 0). */
@@ -699,6 +771,7 @@ const ready = (h: HeroState, id: string) => h.items.includes(id) && (h.itemCd[id
 const emptySources = (): Record<GoldSource, number> => ({
   passive: 0,
   comeback: 0,
+  runes: 0,
   creeps: 0,
   neutrals: 0,
   kills: 0,
@@ -725,6 +798,14 @@ const manaCost = (h: HeroState, isUlt: boolean) =>
   isUlt ? Math.round(90 + 1.2 * h.def.ultimate.cooldown) : Math.round(35 + 3 * h.def.skill.cooldown)
 const avgLevel = (xs: readonly Body[]) => xs.reduce((a, h) => a + h.hero!.level, 0) / xs.length
 
+/** How fight-defining an ultimate is for the buyback utility (spec/12 §2). */
+const ultImpact = (h: HeroState) =>
+  hasDisableEffect(h.def.ultimate)
+    ? 1
+    : h.def.ultimate.target.kind.includes("aoe") || h.def.ultimate.target.kind === "line"
+      ? 0.6
+      : 0.3
+
 export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptions) => {
   const rng = createRandom(options.seed)
   const lanes = new Map(map.lanes.map((l) => [l.id, polyline(l.path)]))
@@ -736,8 +817,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   let paused = false
   let clock = 0
   let acc = 0
-  let nextWave = 1
-  let waveNo = 0
+  /** Match clock of the previous step (wave / camp / rune schedulers, spec/12). */
+  let prevClock = -1
+  let lastWave = -1
+  const dotaNow = () => clock * DOTA
   let uid = 1
   let winner: DraftSide | null = null
   /** The 2-minute tiebreak warning fires once per match. */
@@ -756,11 +839,37 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     blue: { active: null as CoachCall | null, remaining: 0, cooldown: 0 },
     red: { active: null as CoachCall | null, remaining: 0, cooldown: 0 },
   }
-  /** Barracks destroyed per (attacking side, lane) → that side's creeps in that lane are empowered. */
-  const empowered = new Set<string>()
+  /** Barracks destroyed per team/lane/kind → super & mega creep templates (spec/12 §3). */
+  const rax = new tempo.BarracksState()
   /** Camp respawn countdowns, mutated in place (Map order = insertion order, as before). */
-  const campTimers = new Map<string, { left: number }>()
-  let roshanTimer = 0
+  // --- respawn & tempo (spec/12) -----------------------------------------------------
+  // Independent seeded streams per system so one system's draws never shift another's.
+  const roshan = new tempo.RoshanTimer(createRandom((options.seed ^ 0x524f5348) >>> 0))
+  const runeRoller = new tempo.PowerRuneRoller(createRandom((options.seed ^ 0x52554e45) >>> 0))
+  const trees = new tempo.TreeRegrowth()
+  const treeCells = new Map<number, Vec2>()
+  /** Fog-safe pit check: side looked into an empty pit at this clock. */
+  const pitEmptyAt: Record<DraftSide, number> = { blue: -999, red: -999 }
+  const killLog: { t: number; side: DraftSide }[] = []
+  const tempoStats = {
+    waves: 0,
+    sieges: 0,
+    superCreeps: 0,
+    megaCreeps: 0,
+    campSpawns: 0,
+    campBlocks: 0,
+    stacks: 0,
+    sentries: 0,
+    dewards: 0,
+    runes: { power: 0, bounty: 0, wisdom: 0 },
+    runesTaken: 0,
+    powerTypes: [] as tempo.PowerRuneType[],
+    roshan: [] as { diedAt: number; respawnedAt: number | null }[],
+    treesRegrown: 0,
+    tp: 0,
+    buybacks: [] as { t: number; hero: string; reason: tempo.BuybackReason }[],
+    deaths: [] as { t: number; hero: string; level: number; total: number; mods: string[] }[],
+  }
 
   // --- tactics state (spec/06) ------------------------------------------------------
   const tac: Record<DraftSide, TeamTactics> = {
@@ -836,7 +945,6 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
   /** Enemy attack-reveal bubbles per side (granted by the other side's attacks). */
   let reveals: { side: DraftSide; x: number; z: number; until: number }[] = []
-  const cutTrees: TreeEvent[] = []
   const control = { blue: 0, red: 0 }
   let visionTimer = 0
   const spots: readonly WardSpot[] = losWardSpots(map, staticFog)
@@ -847,8 +955,22 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     z: number
     expires: number
     spotId: string
+    kind: "observer" | "sentry"
   }
   let wards: Ward[] = []
+  /** Sentry wards per side (spec/12 §4 camp block / deward), separate from observers. */
+  const sentryStock: Record<DraftSide, number> = { blue: 1, red: 1 }
+  const sentryNext: Record<DraftSide, number> = { blue: SENTRY_RECHARGE, red: SENTRY_RECHARGE }
+  const nearestWalk = (p: Vec2): Vec2 => {
+    if (map.isWalkable(p.x, p.z)) return { x: p.x, z: p.z }
+    for (let r = 1; r < 12; r++)
+      for (let a = 0; a < 16; a++) {
+        const x = p.x + Math.cos((a / 16) * Math.PI * 2) * r
+        const z = p.z + Math.sin((a / 16) * Math.PI * 2) * r
+        if (map.isWalkable(x, z)) return { x, z }
+      }
+    return { x: p.x, z: p.z }
+  }
   /** Where each side last lost a hero (defensive ward target, spec/10 layer 4). */
   const lastDeathAt: Record<DraftSide, { x: number; z: number; t: number } | null> = {
     blue: null,
@@ -1079,6 +1201,13 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           skillCd: 0,
           ultCd: 0,
           respawn: 0,
+          respawnTotal: 0,
+          bb: tempo.createBuybackState(),
+          spawnGuard: 0,
+          spawnAt: null,
+          tpCd: 0,
+          tpTo: null,
+          tpAt: 0,
           aegis: false,
           kills: 0,
           deaths: 0,
@@ -1137,22 +1266,65 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
 
   // --- spawning --------------------------------------------------------------------
-  const spawnWave = () => {
-    waveNo++
-    const roles: ("melee" | "ranged" | "siege")[] = ["melee", "melee", "melee", "ranged"]
-    if (waveNo % 5 === 0) roles.push("siege")
+  /**
+   * Lane creep bodies are pooled (spec/12 §3): pruned corpses sit in quarantine
+   * long enough for every stale reference to have re-targeted, then are reset
+   * in place and reused instead of allocating a fresh body per creep per wave.
+   */
+  const creepPool = new tempo.RecyclePool<Body>(() => ({}) as Body)
+  const quarantine: { b: Body; at: number }[] = []
+  const QUARANTINE_S = 30
+  const addCreep = (b: Omit<Body, "st" | "alive" | "cooldown">) => {
+    const rec = creepPool.acquire()
+    const prevMover = rec.mover
+    for (const k of Object.keys(rec)) delete (rec as unknown as Record<string, unknown>)[k]
+    Object.assign(rec, { cooldown: 0, alive: true, st: emptyStatus() }, b)
+    rec.radius = HULL.creep
+    rec.turnRate = TURN.mid
+    rec.velMag = 0
+    rec.swing = newSwing()
+    if (prevMover) {
+      // Reset the old mover in place (crowd identity follows the new body id).
+      Object.assign(prevMover, newMover(rec))
+      rec.mover = prevMover
+    } else rec.mover = newMover(rec)
+    bodies.push(rec)
+    return rec
+  }
+
+  const spawnWave = (wave: number) => {
+    const comp = tempo.waveComposition(wave)
+    tempoStats.waves++
+    if (comp.siege) tempoStats.sieges++
+    // Continuous growth on top of the 7:30 tiers keeps the old late-game curve.
+    const grow = comp.statMul * (1 + wave * 0.006)
+    const roles: tempo.CreepRole[] = [
+      ...Array<tempo.CreepRole>(comp.melee).fill("melee"),
+      ...Array<tempo.CreepRole>(comp.ranged).fill("ranged"),
+      ...Array<tempo.CreepRole>(comp.siege).fill("siege"),
+    ]
     for (const team of ["radiant", "dire"] as const) {
       for (const [laneId, lane] of lanes) {
-        const strong = empowered.has(`${TEAM_SIDE[team]}:${laneId}`)
-        roles.forEach((role, i) => {
+        let mi = 0
+        let ri = 0
+        for (const role of roles) {
+          const template = tempo.creepTemplate(rax, team, laneId, role)
+          if (template === "super") tempoStats.superCreeps++
+          if (template === "mega") tempoStats.megaCreeps++
+          const tm = tempo.TEMPLATE_MUL[template]
           const melee = role === "melee"
-          const hp =
-            (role === "siege" ? 750 : melee ? 520 : 330) * (strong ? 1.5 : 1) * (1 + waveNo * 0.012)
-          const s0 = -(melee ? 0 : role === "ranged" ? 1.2 : 2.4)
-          const side = melee ? (i - 1) * 0.5 : 0
+          const k = melee ? mi++ : role === "ranged" ? ri++ : 0
+          const hp = (role === "siege" ? 750 : melee ? 520 : 330) * tm.hp * grow
+          // Rows of three melee, ranged pairs behind, siege at the back.
+          const s0 = melee
+            ? -Math.floor(k / 3) * 0.6
+            : role === "ranged"
+              ? -1.2 - Math.floor(k / 2) * 0.6
+              : -2.6
+          const side = melee ? ((k % 3) - 1) * 0.5 : role === "ranged" ? ((k % 2) - 0.5) * 0.6 : 0
           const start = lane.at(team === "radiant" ? s0 : lane.length - s0)
           const dir = team === "radiant" ? 1 : -1
-          add({
+          addCreep({
             id: `creep-${uid++}`,
             type: "creep",
             team,
@@ -1163,8 +1335,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
             hp,
             maxHp: hp,
             armor: melee ? 2 : 0,
-            damage:
-              (role === "siege" ? 55 : melee ? 22 : 26) * (strong ? 1.4 : 1) * (1 + waveNo * 0.01),
+            damage: (role === "siege" ? 55 : melee ? 22 : 26) * tm.dmg * grow,
             attackTime: role === "siege" ? 2.2 : 1,
             range: role === "siege" ? 6 : melee ? 1.2 : 4.5,
             speed: 2.4,
@@ -1173,7 +1344,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
             side,
             rank: 0,
           })
-        })
+        }
       }
     }
   }
@@ -1208,7 +1379,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       })
     }
   }
-  for (const c of map.camps) spawnCamp(c)
+  // Camps start empty and spawn at the first spawn-box check (Dota 1:00).
+  const campStates = new Map(
+    map.camps.map((c) => [c.id, tempo.createCamp(c.id, tempo.boxAround(c.position, CAMP_BOX))]),
+  )
 
   const roshanPos = (() => {
     const r = map.landmarks.find((l) => l.kind === "roshan")!.position
@@ -1237,6 +1411,17 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       contributors: new Map(),
     })
   spawnRoshan()
+  /** Fog-safe Roshan belief for a side (spec/12 §5 Information Fog). */
+  const roshanBelief = (side: DraftSide): boolean => {
+    const pub = roshan.public(dotaNow())
+    if (pub.state === "alive") return true
+    if (pub.state === "dead") return false
+    // Inside the window: a lit pit shows the truth; otherwise trust the CDF
+    // unless we looked recently and found it empty.
+    if (isVisibleToTeam(visionGrid[side], staticFog, roshanPos))
+      return bodies.some((x) => x.alive && x.type === "roshan")
+    return roshan.aliveProbability(dotaNow()) >= 0.5 && clock - pitEmptyAt[side] > 20
+  }
 
   // --- helpers ---------------------------------------------------------------------
   const isEnemy = (a: Body, o: Body) => {
@@ -1264,6 +1449,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
   const deal = (src: Body | undefined, target: Body, raw: number, kind: "physical" | "magic") => {
     if (!target.alive) return
+    // Fountain spawn protection (spec/12 §1): invulnerable until the hero acts.
+    if (target.hero && target.hero.spawnGuard > clock) return
+    if (target.structure || target.type === "roshan") target.hurtAt = clock
     // Eul's cyclone: invulnerable. BKB: immune to magic damage (spec/09).
     if (target.st.cyclone > 0) return
     if (
@@ -1367,12 +1555,30 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     if (target.type === "hero") {
       const h = target.hero!
       h.deaths++
-      h.respawn = (RESPAWN_BASE + h.level * RESPAWN_PER_LEVEL) * (phase === "late" ? 1.3 : 1)
+      // spec/12 §1: level curve + modifiers (respawn ult, pending buyback penalty).
+      const mods: tempo.RespawnModifier[] = []
+      if (h.scythe && h.scythe.until >= clock) mods.push(tempo.reapersScythe(h.scythe.rank))
+      h.scythe = undefined
+      const pen = tempo.consumeDeathPenalty(h.bb)
+      if (pen) mods.push(pen)
+      h.respawn = respawnSeconds(h.level, mods)
+      h.respawnTotal = h.respawn
       h.intent = "dead"
+      h.spawnGuard = 0
+      h.tpTo = null
+      h.stackJob = undefined
+      tempoStats.deaths.push({
+        t: clock,
+        hero: target.id,
+        level: h.level,
+        total: h.respawn,
+        mods: mods.map((m) => m.source),
+      })
       const lost = Math.min(h.gold, 60 + h.level * 15)
       h.gold -= lost
       const enemyTeam = target.team === "radiant" ? "dire" : "radiant"
       kills[sideOf(enemyTeam)]++
+      killLog.push({ t: clock, side: sideOf(enemyTeam) })
       const assisters = heroes.filter(
         (o) =>
           o.team === enemyTeam &&
@@ -1435,7 +1641,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
           (b) => b.alive && b.type === "neutral" && b.home?.campId === campId,
         )
         if (!remaining) {
-          campTimers.set(campId, { left: CAMP_RESPAWN })
+          const cs = campStates.get(campId)
+          if (cs) tempo.clearCamp(cs)
           const kh = killer?.hero
           if (kh) {
             const idx = map.camps.findIndex((c) => c.id === campId)
@@ -1459,7 +1666,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
 
     if (target.type === "roshan") {
       const team = (killer?.team ?? target.lastHit?.team) as Team | undefined
-      roshanTimer = ROSHAN_RESPAWN
+      roshan.killed(dotaNow())
+      tempoStats.roshan.push({ diedAt: clock, respawnedAt: null })
       if (team) {
         for (const h of heroes.filter((x) => x.team === team)) grant(h, ROSHAN_GOLD, 300, "roshan")
         const carrier =
@@ -1515,7 +1723,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         text: `${atkSide === "blue" ? draft.blue.name : draft.red.name} destroyed a tier ${s.tier} tower${s.lane ? ` (${s.lane})` : ""}${paid === "push" || paid === "group" ? ` — Call paid off: ${lane} T${s.tier} tower falls` : ""}`,
       })
     } else if (target.type === "rax") {
-      if (s.lane) empowered.add(`${atkSide}:${s.lane}`)
+      if (s.lane)
+        rax.destroy(s.team as Team, s.lane, s.kind === "barracks-melee" ? "melee" : "ranged")
       tier3Down = true
       feed.push({
         t: clock,
@@ -1820,6 +2029,12 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     else fx({ t: clock, kind: "aoe", at: { x: b.x, z: b.z }, radius: 1.4, team: b.team, style })
     if (isUlt) h.ultCd = ability.cooldown
     else h.skillCd = ability.cooldown
+    if (isUlt && RESPAWN_ULTS[h.def.id]) {
+      // Reaper's Scythe analogue: heroes hit and killed within 1.5 s respawn later.
+      const rank = (h.level >= 14 ? 3 : h.level >= 10 ? 2 : 1) as 1 | 2 | 3
+      for (const t of targets) if (t.hero) t.hero.scythe = { rank, until: clock + 1.5 }
+    }
+    h.spawnGuard = 0
     b.swings = (b.swings ?? 0) + 1
     casts.set(
       `${h.def.id}:${isUlt ? "ult" : "skill"}`,
@@ -2183,7 +2398,10 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       gameMinutes: clock / 60,
       main: h.inv.main,
       gold: h.gold,
-      floor: goldFloor(h.level, clock / 60, lostT3[h.side], false),
+      floor:
+        goldFloor(h.level, clock / 60, lostT3[h.side], false) > 0
+          ? tempo.buybackCost(netWorthOf(h))
+          : 0,
       consumed: h.consumed,
     })
     if (!act) return
@@ -2209,7 +2427,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   }
   /** Buyback reserve (spec/10 layer 3); rule items ignore it. */
   const floorFor = (h: HeroState, reason: string | undefined) =>
-    goldFloor(h.level, clock / 60, lostT3[h.side], reason?.startsWith("rule:") ?? false)
+    goldFloor(h.level, clock / 60, lostT3[h.side], reason?.startsWith("rule:") ?? false) > 0
+      ? tempo.buybackCost(netWorthOf(h))
+      : 0
   /**
    * Buy toward the next item. At base items land in the inventory; away from
    * base they land in the stash and the courier delivers them (spec/10 S3).
@@ -2313,7 +2533,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       return o ? { x: o.x, z: o.z } : null
     },
     isCore: (b) => coreOf(b.hero!.side) === b,
-    roshanUp: () => bodies.some((x) => x.alive && x.type === "roshan"),
+    roshanUp: (side) => roshanBelief(side),
     nextItemCost: (b) => {
       const n = nextItemOf(b.hero!)
       return n ? itemById(n.id).cost : null
@@ -2379,6 +2599,162 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
   }
 
+  /** Support tempo jobs (spec/12 §4–5). Returns true when it set the hero's intent. */
+  const tempoMission = (b: Body): boolean => {
+    const h = b.hero!
+    const side = h.side
+    const team = b.team as Team
+    const support = h.role === "support" || h.slot === "roam"
+    if (!support) return false
+    const enemiesClose = brain.known(side, 0).some((e) => e.visible && dist(e.pos, b) < 9)
+    if (enemiesClose) return false
+    // Sentry job.
+    if (h.wardJob) {
+      h.intent = "ward"
+      h.goal = h.wardJob.at
+      return true
+    }
+    // Rune alarm: walk to a rune that spawns within the next 15 Dota seconds,
+    // or grab one already lying nearby.
+    const dNow = dotaNow()
+    const up = tempo.upcomingRunes(dNow)
+    const lying = runes
+      .filter((r) => dist(r, b) < 30)
+      .toSorted((x, y) => dist(x, b) - dist(y, b))[0]
+    if (lying) {
+      h.intent = "rune"
+      h.goal = { x: lying.x, z: lying.z }
+      return true
+    }
+    if (up.length > 0 && clock < LATE_AT) {
+      const want = up.some((u) => u.kind === "bounty") ? bountySpots : runeSpots
+      const spot = want.toSorted((x, y) => dist(x, b) - dist(y, b))[0]
+      if (spot && dist(spot, b) < 30) {
+        h.intent = "rune"
+        h.goal = spot
+        return true
+      }
+    }
+    // Stack: in the Dota :40–:55 window, pull the core's nearest own big camp.
+    const sec = dNow % 60
+    const minute = Math.floor(dNow / 60)
+    if (h.stackJob && h.stackJob.minute !== minute) h.stackJob = undefined
+    if (sec >= 40 && sec < 56 && !h.stackJob?.pulled && clock > (3 * 60) / DOTA) {
+      const camp = h.stackJob
+        ? map.camps.find((c) => c.id === h.stackJob!.campId)
+        : map.camps
+            .filter(
+              (c) =>
+                c.team === team &&
+                (c.kind === "large" || c.kind === "ancient") &&
+                (campStates.get(c.id)?.stacks ?? 0) > 0,
+            )
+            .toSorted((x, y) => dist(x.position, b) - dist(y.position, b))[0]
+      if (camp && dist(camp.position, b) < 26) {
+        const plan = tempo.planStack({
+          heroDistance: Math.max(0, dist(camp.position, b) - b.range) * DOTA,
+          heroSpeed: b.speed * DOTA,
+          exitDistance: CAMP_BOX + 1.5,
+          creepSpeed: 2.6 * DOTA,
+        })
+        if (plan.feasible || h.stackJob) {
+          h.stackJob ??= { campId: camp.id, minute, pulled: false }
+          h.intent = "stack"
+          h.goal = camp.position
+          return true
+        }
+      }
+    }
+    // Sentry block: deny an enemy large camp when we have spare sentries.
+    if (sentryStock[side] > 1 && phase !== "laning") {
+      const target = map.camps.find(
+        (c) =>
+          c.team !== team &&
+          c.kind === "large" &&
+          !wards.some(
+            (w) =>
+              w.kind === "sentry" && w.side === side && tempo.inBox(campStates.get(c.id)!.box, w),
+          ),
+      )
+      if (target) {
+        h.wardJob = { kind: "block", campId: target.id, at: nearestWalk(target.position) }
+        h.intent = "ward"
+        h.goal = h.wardJob.at
+        return true
+      }
+    }
+    return false
+  }
+
+  /** Per-tick support job execution: stack pulls, rune pickup, sentry plant/deward. */
+  const tickMissions = (b: Body) => {
+    const h = b.hero!
+    const side = h.side
+    for (const r of runes)
+      if (dist(r, b) < 1.4) {
+        takeRune(b, r)
+        h.rethink = 0
+        break
+      }
+    if (h.intent === "stack" && h.stackJob && !h.stackJob.pulled) {
+      const camp = map.camps.find((c) => c.id === h.stackJob!.campId)
+      const sec = dotaNow() % 60
+      const n = camp
+        ? bodies.filter((x) => x.alive && x.type === "neutral" && x.home?.campId === camp.id)
+        : []
+      const t = n.toSorted((x, y) => dist(x, b) - dist(y, b))[0]
+      if (t && sec >= tempo.STACK_WINDOW[0] - 0.5 && dist(t, b) <= b.range + 1.5) {
+        // Hit once, then run: the camp chases out of its spawn box.
+        deal(b, t, b.damage * 0.3, "physical")
+        for (const x of n) {
+          x.lastHit = b
+          x.pullUntil = clock + PULL_CHASE
+        }
+        h.stackJob.pulled = true
+        h.intent = "retreat"
+        const away = {
+          x: b.x + (b.x - camp!.position.x) * 2,
+          z: b.z + (b.z - camp!.position.z) * 2,
+        }
+        h.goal = nearestWalk(away)
+        h.rethink = PULL_CHASE
+      }
+    }
+    if (h.intent === "ward" && h.wardJob && dist(b, h.wardJob.at) < 1.6) {
+      const job = h.wardJob
+      h.wardJob = undefined
+      h.rethink = 0
+      if (job.kind === "block" && sentryStock[side] > 0) {
+        sentryStock[side]--
+        tempoStats.sentries++
+        wards.push({
+          id: `ward-${uid++}`,
+          side,
+          x: job.at.x,
+          z: job.at.z,
+          expires: clock + WARD_LIFETIME,
+          spotId: `sentry-${job.campId}`,
+          kind: "sentry",
+        })
+      } else if (job.kind === "deward" && sentryStock[side] > 0) {
+        sentryStock[side]--
+        const box = campStates.get(job.campId)!.box
+        const hit = wards.filter((w) => w.side !== side && tempo.inBox(box, w))
+        if (hit.length) {
+          wards = wards.filter((w) => !hit.includes(w))
+          tempoStats.dewards += hit.length
+          grant(b, WARD_BOUNTY * hit.length, 0, "wards")
+          feed.push({
+            t: clock,
+            kind: "ward",
+            side,
+            text: `${heroLabel(b)} cleared a sentry blocking the camp`,
+          })
+        }
+      }
+    }
+  }
+
   const think = (b: Body) => {
     const h = b.hero!
     const side = h.side
@@ -2413,6 +2789,8 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       return
     }
     if (h.intent === "shop" && !atBase && next && h.gold >= itemById(next.id).cost) return
+    // spec/12 missions for supports: sentry jobs, stack pulls, rune alarms.
+    if (!coach && tempoMission(b)) return
     // Warding (spec/06): the team's warder spends charges on the best open spot.
     if (wardStock[side].charges > 0 && warderOf(side) === b && !coach) {
       const spot = wardTarget(side)
@@ -2438,6 +2816,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   let fizzled = 0
   const useActive = (b: Body, id: string, cd: number, text: string) => {
     b.hero!.itemCd[id] = cd
+    b.hero!.spawnGuard = 0
     activeUses[id] = (activeUses[id] ?? 0) + 1
     fx({
       t: clock,
@@ -3050,7 +3429,9 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const cutTree = (x: number, z: number): boolean => {
     const ok = destroyTree(staticFog, { x, z })
     if (ok) {
-      cutTrees.push({ x, z, regrowAt: clock * 10 + TREE_REGROW_TICKS })
+      const cell = Math.floor(z / FOG_CELL) * staticFog.cols + Math.floor(x / FOG_CELL)
+      treeCells.set(cell, { x, z })
+      trees.destroy(cell, dotaNow())
       nav.cutTree({ x, z }) // spec/11: dynamic nav dirty update
       visionTimer = 0 // dirty: recompute on the next tick
     }
@@ -3085,6 +3466,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
             z: spot.at.z,
             expires: clock + WARD_LIFETIME,
             spotId: spot.id,
+            kind: "observer",
           })
         }
         h.rethink = 0
@@ -3245,18 +3627,26 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       visionTimer = 0.5
     }
     // Tree regrowth (spec/08 §4c): retry while occupied.
-    if (cutTrees.length > 0) {
-      const before = cutTrees.length
-      const regrown: Vec2[] = []
-      regrowTrees(staticFog, cutTrees, clock * 10, (p) => {
-        const occ = bodies.some(
-          (b) => b.alive && Math.abs(b.x - p.x) < 1 && Math.abs(b.z - p.z) < 1,
-        )
-        if (!occ) regrown.push(p)
-        return occ
+    // Tree regrowth (spec/12 §5): 3 Dota minutes after DestroyedTimestamp; restores
+    // the fog blocker and the nav cell, retrying while a unit stands on it.
+    if (trees.destroyedAt.size > 0) {
+      const regrown = trees.tick(dotaNow(), {
+        isOccupied: (cell) => {
+          const p = treeCells.get(cell)!
+          return bodies.some((o) => o.alive && Math.abs(o.x - p.x) < 1 && Math.abs(o.z - p.z) < 1)
+        },
+        restoreFogBlocker: (cell) => {
+          staticFog.cutTrees[cell] = 0
+        },
+        restoreNav: (cell) => {
+          nav.regrowTree(treeCells.get(cell)!)
+        },
       })
-      if (regrown.length) for (const p of regrown) nav.regrowTree(p) // spec/11
-      if (cutTrees.length < before) visionTimer = 0
+      if (regrown.length) {
+        for (const c of regrown) treeCells.delete(c)
+        tempoStats.treesRegrown += regrown.length
+        visionTimer = 0
+      }
     }
     tickWards(dt)
     for (const side of ["blue", "red"] as const) {
@@ -3372,27 +3762,301 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     }
   }
 
+  // --- hero life: respawn, dead brain, buyback (spec/12 §1–2) -------------------------
+  const respawn = (b: Body) => {
+    const h = b.hero!
+    const f = fountain(b.team as Team)
+    b.alive = true
+    b.hp = b.maxHp
+    h.mana = h.maxMana
+    b.x = f.x + rng.range(-1, 1)
+    b.z = f.z + rng.range(-1, 1)
+    b.st = emptyStatus()
+    b.path = undefined
+    h.respawn = 0
+    h.respawnTotal = 0
+    h.intent = "lane"
+    h.rethink = 0
+    h.spawnGuard = clock + tempo.SPAWN_PROTECTION_MAX / DOTA
+    h.spawnAt = { x: b.x, z: b.z }
+    if (h.tpTo) {
+      h.tpAt = clock + TP_CHANNEL
+      h.spawnGuard = 0 // TP is an item use
+    }
+  }
+  const baseUnderAttack = (team: Team) =>
+    structList.some(
+      (t) =>
+        t.alive &&
+        t.team === team &&
+        (t.type === "rax" || (t.type === "tower" && (t.structure?.tier ?? 1) >= 3)) &&
+        (t.hurtAt ?? -99) > clock - 3,
+    )
+  const recentKills = (side: DraftSide, window: number) =>
+    killLog.filter((k) => k.side === side && k.t > clock - window).length
+  const deadBrain = (b: Body) => {
+    const h = b.hero!
+    const team = b.team as Team
+    const side = h.side
+    const enemy = otherSide(side)
+    // 1) Shop & sort (buy() respects the buyback reserve floor).
+    buy(b, true)
+    while (promoteFirstBackpack(h.inv, clock));
+    // 2) Buyback utility.
+    const own = heroes.filter((x) => x.team === team)
+    const foes = heroes.filter((x) => x.team !== team)
+    const anc = structList.find((t) => t.type === "ancient" && t.team === team)!
+    const enemyAnc = structList.find((t) => t.type === "ancient" && t.team !== team)!
+    const lit = (o: Body) => isVisibleToTeam(visionGrid[side], staticFog, o)
+    const fightAt = own.find(
+      (a) => a.alive && foes.some((e) => e.alive && lit(e) && dist(e, a) < 9),
+    )
+    const roshFight =
+      bodies.some((x) => x.alive && x.type === "roshan" && (x.hurtAt ?? -99) > clock - 3) &&
+      own.some((a) => a.alive && dist(a, roshanPos) < 8)
+    const towers = structList.filter((t) => t.alive && t.type === "tower" && t.team === team)
+    const nearestTower = (p: Vec2) =>
+      towers.reduce<Body | null>((m, t) => (!m || dist(t, p) < dist(m, p) ? t : m), null)
+    const tAnc = nearestTower(enemyAnc)
+    const timeToAncient =
+      (tAnc
+        ? TP_CHANNEL + dist(tAnc, enemyAnc) / b.speed
+        : dist(fountain(team), enemyAnc) / b.speed) * DOTA
+    const deadFoes = foes.filter((x) => !x.alive)
+    const enemiesAtBase = foes.filter((e) => e.alive && lit(e) && dist(e, anc) < 22).length
+    const ctxBb: tempo.BuybackContext = {
+      gold: h.gold,
+      netWorth: netWorthOf(h),
+      now: dotaNow(),
+      respawnRemaining: h.respawn * DOTA,
+      // A real high-ground push: structure hit AND ≥2 visible enemy heroes at the base
+      // (a lone creep wave on a T3 is not worth a buyback).
+      highGroundUnderAttack: baseUnderAttack(team) && enemiesAtBase >= 2,
+      alliesAlive: own.filter((x) => x.alive).length,
+      enemiesAtBase,
+      // A fight worth a buyback: past laning, ≥2 allies engaged, kills still trading.
+      bigFightOngoing:
+        phase !== "laning" &&
+        (roshFight ||
+          (!!fightAt &&
+            own.filter((a) => a.alive && dist(a, fightAt) < 9).length >= 2 &&
+            recentKills(enemy, 10) + recentKills(side, 10) > 0)),
+      fightRemaining: 10 * DOTA,
+      ultReady: h.level >= 6 && h.ultCd <= 0,
+      ultImpact: ultImpact(h),
+      hasTp: h.tpCd <= 0,
+      wonFight: recentKills(side, 20) - recentKills(enemy, 20) >= 2 && vulnerable(enemyAnc),
+      isCoreDamage: h.role === "carry" || h.role === "mid",
+      timeToAncient,
+      enemyMinRespawn: deadFoes.length
+        ? Math.min(...deadFoes.map((x) => x.hero!.respawn)) * DOTA
+        : 0,
+    }
+    const d = tempo.decideBuyback(h.bb, ctxBb)
+    if (d.buy) {
+      const cost = tempo.useBuyback(h.bb, {
+        dead: true,
+        gold: h.gold,
+        netWorth: ctxBb.netWorth,
+        now: ctxBb.now,
+      })
+      if (cost !== null) {
+        h.gold -= cost
+        tempoStats.buybacks.push({ t: clock, hero: b.id, reason: d.reason })
+        const why =
+          d.reason === "base-defense"
+            ? "to defend the base"
+            : d.reason === "game-ending-push"
+              ? "to end the game"
+              : "for the fight"
+        feed.push({
+          t: clock,
+          kind: "buyback",
+          side,
+          text: `${heroLabel(b)} buys back ${why} (${cost} gold)`,
+        })
+        h.respawn = 0
+      }
+    }
+    // 3) TP plan for the first tick alive.
+    // TP only when it matters: defend the base, join a live fight, or push after laning.
+    const objective = baseUnderAttack(team)
+      ? defendSpot(team)
+      : (fightAt ?? (phase !== "laning" ? objectiveFor(team) : null) ?? null)
+    const plan = tempo.planDeadBrain({
+      gold: 0,
+      reserve: 0,
+      shoppingList: [],
+      main: h.inv.main,
+      backpack: h.inv.backpack,
+      value: (id) => lookupItem(id).cost,
+      hasTp: h.tpCd <= 0,
+      objective: objective ? { x: objective.x, z: objective.z } : null,
+      towers: towers.map((t) => ({ x: t.x, z: t.z })),
+    })
+    const tp = plan.find((a) => a.kind === "tp")
+    h.tpTo = tp && tp.kind === "tp" && dist(tp.to, fountain(team)) > 25 ? nearestWalk(tp.to) : null
+  }
+
+  // --- respawn & tempo tick (spec/12) ------------------------------------------------
+  interface Rune {
+    id: string
+    kind: tempo.RuneKind
+    type: tempo.PowerRuneType | null
+    x: number
+    z: number
+  }
+  let runes: Rune[] = []
+  const runeSpots = map.landmarks
+    .filter((l) => l.kind === "rune")
+    .toSorted((a, b) => a.position.z - b.position.z)
+    .map((l) => nearestWalk(l.position))
+  const bountySpots = (["radiant", "dire"] as const).map((team) => {
+    const camps = map.camps.filter((c) => c.team === team)
+    const cx = camps.reduce((a, c) => a + c.position.x, 0) / camps.length
+    const cz = camps.reduce((a, c) => a + c.position.z, 0) / camps.length
+    return nearestWalk({ x: cx, z: cz })
+  })
+  const spawnRune = (kind: tempo.RuneKind, at: number) => {
+    if (kind === "power") {
+      const r = runeRoller.roll(at)
+      tempoStats.runes.power++
+      tempoStats.powerTypes.push(r.type)
+      const spot = runeSpots[r.spot === "top" ? 0 : 1] ?? runeSpots[0]!
+      runes = runes.filter((x) => x.kind !== "power") // an unclaimed power rune is replaced
+      runes.push({ id: `rune-${uid++}`, kind, type: r.type, x: spot.x, z: spot.z })
+      return
+    }
+    tempoStats.runes[kind]++
+    const at2 = kind === "bounty" ? bountySpots : runeSpots
+    runes = runes.filter((x) => x.kind !== kind)
+    for (const spot of at2)
+      runes.push({ id: `rune-${uid++}`, kind, type: null, x: spot.x, z: spot.z })
+  }
+  const takeRune = (b: Body, r: Rune) => {
+    const h = b.hero!
+    runes = runes.filter((x) => x !== r)
+    tempoStats.runesTaken++
+    h.spawnGuard = 0
+    let text = ""
+    if (r.kind === "bounty") {
+      const g = 40 + Math.round(clock / 60) * 9
+      for (const a of heroes.filter((x) => x.team === b.team)) grant(a, g, 0, "runes")
+      text = `took a bounty rune (+${g} team gold)`
+    } else if (r.kind === "wisdom") {
+      grant(b, 0, 250 + clock * 1.2, "runes")
+      text = "took a wisdom rune"
+    } else {
+      const t = r.type!
+      const dur = 45 / DOTA
+      if (t === "haste") b.st.buffs.push({ stat: "speed", pct: 0.45, t: dur })
+      else if (t === "double-damage") b.st.buffs.push({ stat: "attack", pct: 1, t: dur })
+      else if (t === "arcane") {
+        h.skillCd *= 0.6
+        h.ultCd *= 0.6
+      } else if (t === "invisibility") b.st.glimmer = Math.max(b.st.glimmer, dur * 0.6)
+      else if (t === "regeneration") {
+        b.st.hots.push({ hps: b.maxHp / 6, t: 6, src: b })
+        h.mana = h.maxMana
+      } else b.st.shield = Math.max(b.st.shield, b.maxHp * 0.35)
+      if (t === "shield") b.st.shieldT = dur
+      text = `took a ${t.replace("-", " ")} rune`
+    }
+    feed.push({ t: clock, kind: "rune", side: h.side, text: `${heroLabel(b)} ${text}` })
+  }
+
+  const campBlockers = (cs: tempo.CampState): tempo.BoxOccupant[] => {
+    const out: tempo.BoxOccupant[] = []
+    for (const b of bodies) {
+      if (!b.alive || b.structure) continue
+      if (!tempo.inBox(cs.box, b)) continue
+      const kind = b.type === "hero" ? "hero" : b.type === "creep" ? "creep" : "neutral"
+      if (b.type === "roshan") continue
+      out.push({ id: b.id, kind, pos: b })
+    }
+    for (const w of wards) if (tempo.inBox(cs.box, w)) out.push({ id: w.id, kind: "ward", pos: w })
+    return out
+  }
+  const campCheck = () => {
+    for (const camp of map.camps) {
+      const cs = campStates.get(camp.id)!
+      const side = sideOf(camp.team)
+      const watched = isVisibleToTeam(visionGrid[side], staticFog, camp.position)
+      const occupants = campBlockers(cs)
+      const res = tempo.trySpawnCamp(cs, occupants)
+      if (res.spawned) {
+        tempoStats.campSpawns++
+        if (cs.stacks > 1) tempoStats.stacks++
+        spawnCamp(camp)
+      } else tempoStats.campBlocks++
+      // Fog-safe sentry inference (spec/12 §4): only what this side can see.
+      const visibleBlockers = occupants.filter((o) => {
+        if (o.kind === "ward") return wards.some((w) => w.id === o.id && w.side === side)
+        const b = bodyById.get(o.id)
+        return (
+          !!b &&
+          (b.team === camp.team ||
+            b.team === "neutral" ||
+            isVisibleToTeam(visionGrid[side], staticFog, b))
+        )
+      }).length
+      const act = tempo.suspectBlock(camp.id, {
+        hadVision: watched,
+        campAppeared: res.spawned,
+        visibleBlockers,
+      })
+      if (act.kind === "deward") {
+        const sup = warderOf(side)
+        if (sup && !sup.hero!.wardJob && sentryStock[side] > 0)
+          sup.hero!.wardJob = { kind: "deward", campId: camp.id, at: nearestWalk(camp.position) }
+      }
+    }
+  }
+
+  const tickTempo = () => {
+    const dNow = dotaNow()
+    const dPrev = prevClock < 0 ? -1 : prevClock * DOTA
+    // Creep waves: the match clock keeps the 30 s metronome (spec/12 §S6).
+    // Wave k leaves at match second 1 + 30k; the index guard makes it exactly-once.
+    for (const w of tempo.wavesDue(prevClock < 0 ? -1 : prevClock - 1, clock - 1))
+      if (w > lastWave) {
+        lastWave = w
+        spawnWave(w)
+      }
+    // Neutral spawn boxes: every Dota :00 from 1:00 (= 30 match seconds).
+    for (let k = 0; k < tempo.campTicksDue(dPrev, dNow).length; k++) campCheck()
+    // Runes.
+    for (const kind of ["bounty", "power", "wisdom"] as const)
+      for (const at of tempo.runeTimesDue(kind, dPrev, dNow)) spawnRune(kind, at)
+    // Roshan: authoritative respawn; teams learn it only through fog.
+    if (roshan.tick(dNow)) {
+      spawnRoshan()
+      const last = tempoStats.roshan.at(-1)
+      if (last) last.respawnedAt = clock
+    }
+    for (const side of ["blue", "red"] as const)
+      if (
+        !roshan.alive &&
+        isVisibleToTeam(visionGrid[side], staticFog, roshanPos) &&
+        roshan.public(dNow).state === "maybe"
+      )
+        pitEmptyAt[side] = clock
+    // Sentry stock recharge.
+    for (const side of ["blue", "red"] as const) {
+      sentryNext[side] -= TICK
+      if (sentryNext[side] <= 0) {
+        sentryStock[side] = Math.min(2, sentryStock[side] + 1)
+        sentryNext[side] = SENTRY_RECHARGE
+      }
+    }
+    prevClock = clock
+  }
+
   const step = (dt: number) => {
     if (winner) return
     clock += dt
 
-    if (clock >= nextWave) {
-      spawnWave()
-      nextWave += WAVE_INTERVAL
-    }
-    if (campTimers.size > 0)
-      campTimers.forEach((t, id) => {
-        t.left -= dt
-        if (t.left <= 0) {
-          campTimers.delete(id)
-          const camp = map.camps.find((c) => c.id === id)
-          if (camp) spawnCamp(camp)
-        }
-      })
-    if (roshanTimer > 0) {
-      roshanTimer -= dt
-      if (roshanTimer <= 0) spawnRoshan()
-    }
+    tickTempo()
     for (const side of ["blue", "red"] as const) {
       const c = calls[side]
       c.cooldown = Math.max(0, c.cooldown - dt)
@@ -3436,20 +4100,37 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     for (let bi = 0; bi < heroes.length; bi++) {
       const b = heroes[bi]!
       const h = b.hero!
+      // Cooldowns run through death (spec/12 §1 dead-state cleanup keeps them).
+      h.skillCd = Math.max(0, h.skillCd - dt)
+      h.ultCd = Math.max(0, h.ultCd - dt)
+      h.tpCd = Math.max(0, h.tpCd - dt)
       if (!b.alive) {
         h.respawn -= dt
-        if (h.respawn <= 0) {
-          const f = fountain(b.team as Team)
-          b.alive = true
-          b.hp = b.maxHp
-          b.x = f.x + rng.range(-1, 1)
-          b.z = f.z + rng.range(-1, 1)
-          b.st = emptyStatus()
-          h.intent = "lane"
-          h.rethink = 0
-        }
+        for (const id in h.itemCd) h.itemCd[id] = Math.max(0, h.itemCd[id]! - dt)
+        // Dead brain: shop/sort once a second, weigh buyback, plan the TP.
+        if (Math.round(clock / TICK) % 10 === bi % 10) deadBrain(b)
+        if (h.respawn <= 0) respawn(b)
         brain.release(h.side, b.id)
         continue
+      }
+      // Fountain protection breaks on the first move (spec/12 §1); casts/items break it too.
+      if (h.spawnGuard > 0 && (h.spawnGuard <= clock || (h.spawnAt && dist(b, h.spawnAt) > 0.3)))
+        h.spawnGuard = 0
+      // TP channel (planned while dead).
+      if (h.tpTo && clock >= h.tpAt && h.tpAt > 0) {
+        b.x = h.tpTo.x
+        b.z = h.tpTo.z
+        b.path = undefined
+        h.tpTo = null
+        h.tpAt = 0
+        h.tpCd = TP_COOLDOWN
+        h.rethink = 0
+        tempoStats.tp++
+        fx({ t: clock, kind: "heal", at: { x: b.x, z: b.z }, team: b.team })
+      }
+      if (h.tpTo && h.tpAt > 0) {
+        if (b.st.stun > 0) h.tpAt = clock + TP_CHANNEL // interrupted: restart channel
+        continue // channeling: stand still
       }
       h.gold += PASSIVE_GOLD * dt
       h.goldEarned += PASSIVE_GOLD * dt
@@ -3467,8 +4148,6 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         h.goldEarned += cbPerHero * dt
         sources[h.side].comeback += cbPerHero * dt
       }
-      h.skillCd = Math.max(0, h.skillCd - dt)
-      h.ultCd = Math.max(0, h.ultCd - dt)
       h.mana = Math.min(h.maxMana, h.mana + h.manaRegen * dt)
       // Tango (spec/10 S5a): eat a tree when the heal would not be wasted.
       let regenLeft = 0
@@ -3491,6 +4170,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         // Reaction time from player sense: 0.3 s (sharp) .. 0.8 s (slow).
         h.rethink = 0.8 - (h.player.sense / 20) * 0.5
       }
+      tickMissions(b)
       if (b.st.stun > 0 || b.st.cyclone > 0) continue
       // Layer 3 micro-combat: defensive / engage item triggers, then positioning ring.
       if (microItems(b)) continue
@@ -3540,7 +4220,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         bodies.some(
           (c) => c.alive && c.type === "creep" && c.team === b.team && dist(c, tower) < 6.5,
         )
-      const leash = h.intent === "lane" ? 7 : h.intent === "ward" || h.intent === "shop" ? 3 : 99
+      const leash =
+        h.intent === "lane"
+          ? 7
+          : h.intent === "ward" ||
+              h.intent === "shop" ||
+              h.intent === "rune" ||
+              h.intent === "stack"
+            ? 3
+            : 99
       if (target && dive && dist(b, target) < leash) {
         engageTarget(b, target, dt)
       } else if (h.goal) {
@@ -3588,8 +4276,11 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       const b = bodies[bi]!
       if (!b.alive || (b.type !== "neutral" && b.type !== "roshan")) continue
       const home = b.home!
+      const pulled = (b.pullUntil ?? 0) > clock
       const aggro =
-        b.lastHit && b.lastHit.alive && dist(b.lastHit, home) < (b.type === "roshan" ? 7 : 5)
+        b.lastHit &&
+        b.lastHit.alive &&
+        (pulled || dist(b.lastHit, home) < (b.type === "roshan" ? 7 : 5))
           ? b.lastHit
           : undefined
       if (aggro) {
@@ -3627,7 +4318,17 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
         if (!b.alive && (b.type === "creep" || b.type === "neutral" || b.type === "roshan")) {
           bodies.splice(i, 1)
           bodyById.delete(b.id)
+          if (b.type === "creep") quarantine.push({ b, at: clock })
         }
+      }
+      // Recycle creep bodies once every stale reference has had time to drop them.
+      while (quarantine.length > 0 && quarantine[0]!.at < clock - QUARANTINE_S) {
+        const q = quarantine.shift()!.b
+        for (const o of bodies) {
+          if (o.target === q) o.target = undefined
+          if (o.lastHit === q) o.lastHit = undefined
+        }
+        creepPool.release(q)
       }
     }
 
@@ -3682,7 +4383,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
   const call = (side: DraftSide, c: CoachCall): boolean => {
     const s = calls[side]
     if (s.cooldown > 0 || winner) return false
-    if (c === "roshan" && !bodies.some((x) => x.alive && x.type === "roshan")) return false
+    if (c === "roshan" && !roshanBelief(side)) return false
     s.active = c
     s.remaining = CALL_DURATION
     s.cooldown = CALL_COOLDOWN
@@ -3851,7 +4552,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     else if (
       clock > 12 * 60 &&
       avgLevel(mine) >= avgLevel(theirs) &&
-      bodies.some((x) => x.alive && x.type === "roshan") &&
+      roshanBelief(side) &&
       (style === "macro" || rng.chance(0.3))
     )
       call(side, "roshan")
@@ -3974,6 +4675,15 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       hp: b.hp / b.maxHp,
       alive: b.alive,
       respawnIn: b.alive ? 0 : Math.max(0, h.respawn),
+      respawnTotal: b.alive ? 0 : h.respawnTotal,
+      buyback: {
+        cost: tempo.buybackCost(netWorthOf(h)),
+        cooldown: tempo.buybackCooldownLeft(h.bb, dotaNow()) / DOTA,
+        ready:
+          tempo.buybackCooldownLeft(h.bb, dotaNow()) === 0 &&
+          h.gold >= tempo.buybackCost(netWorthOf(h)),
+      },
+      protected: b.alive && h.spawnGuard > clock,
       kills: h.kills,
       deaths: h.deaths,
       assists: h.assists,
@@ -4029,7 +4739,16 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     heroes: heroes.map(line),
     feed: [...feed],
     calls: { blue: { ...calls.blue }, red: { ...calls.red } },
-    roshanAlive: bodies.some((b) => b.alive && b.type === "roshan"),
+    roshanAlive: roshan.public(dotaNow()).state !== "dead",
+    roshanWindow: (() => {
+      const pub = roshan.public(dotaNow())
+      return {
+        state: pub.state,
+        earliest: pub.earliest === null ? null : pub.earliest / DOTA,
+        latest: pub.latest === null ? null : pub.latest / DOTA,
+      }
+    })(),
+    runes: runes.map((r) => ({ id: r.id, kind: r.kind, type: r.type, x: r.x, z: r.z })),
     winner,
     phase,
     phaseAt: { ...phaseAt },
@@ -4046,6 +4765,7 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
       x: w.x,
       z: w.z,
       expiresIn: Math.max(0, w.expires - clock),
+      kind: w.kind,
     })),
     wardStock: {
       blue: { charges: wardStock.blue.charges, next: wardStock.blue.next },
@@ -4128,6 +4848,25 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
     visibleTo: (side: DraftSide, x: number, z: number) =>
       isVisibleToTeam(visionGrid[side], staticFog, { x, z }),
     castCounts: (): ReadonlyMap<string, number> => casts,
+    /** spec/12 tempo counters (tests, balance reports). */
+    tempoStats: () => ({
+      ...tempoStats,
+      pool: { created: creepPool.created, reused: creepPool.reused },
+      camps: [...campStates.values()].map((c) => ({ id: c.id, stacks: c.stacks })),
+      sentryStock: { ...sentryStock },
+    }),
+    /** Test hook: plant a ward (observer/sentry) for a side at a point. */
+    plantWard: (side: DraftSide, x: number, z: number, kind: "observer" | "sentry") => {
+      wards.push({
+        id: `ward-${uid++}`,
+        side,
+        x,
+        z,
+        expires: clock + WARD_LIFETIME,
+        spotId: `manual-${uid}`,
+        kind,
+      })
+    },
     /** Hero Think counters (spec/09 acceptance): item actives fired, projectiles fizzled. */
     thinkStats: () => ({ actives: { ...activeUses }, fizzled, lockCasts: { ...lockCasts } }),
     /** Run to completion headlessly (tests, balance reports). */
