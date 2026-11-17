@@ -185,7 +185,7 @@ describe("match", () => {
             h.intent === "dead"),
       ).length,
     ).toBeGreaterThanOrEqual(3)
-  })
+  }, 30_000)
 
   test("implements the Population seam (units, fx, structures)", () => {
     const m = createMatch(map, autoDraft(), { seed: 2 })

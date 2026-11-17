@@ -10,7 +10,8 @@
     "test": "bun test",
     "bench:memory": "bun build bench/memory.ts --target=node --outfile=.bench/memory.mjs && node --expose-gc .bench/memory.mjs",
     "bench:alloc": "bun build bench/alloc-profile.ts --target=node --outfile=.bench/alloc.mjs && node .bench/alloc.mjs",
-    "bench:fingerprint": "bun bench/fingerprint.ts"
+    "bench:fingerprint": "bun bench/fingerprint.ts",
+    "bench:aggression": "bun bench/aggression.ts"
   },
   "dependencies": {
     "@mobacraft/map": "workspace:*"

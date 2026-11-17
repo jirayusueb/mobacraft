@@ -35,16 +35,6 @@ const autoDraft = (a = 0, b = 1): DraftState => {
   return d
 }
 
-const withBehavior = (t: TeamTactics, aggression: number): TeamTactics => ({
-  ...t,
-  players: Object.fromEntries(
-    Object.entries(t.players).map(([id, p]) => [
-      id,
-      { ...p, behavior: { ...p.behavior, aggression } },
-    ]),
-  ),
-})
-
 describe("synergy & counter matrix", () => {
   test("tags are derived, every hero has one, no tag covers > 60 % of the roster", () => {
     const counts = new Map<string, number>()
@@ -224,28 +214,6 @@ describe("match with tactics", () => {
     }
     expect(tested).toBe(true)
   }, 30_000)
-
-  test("aggression 100 vs 0 produces ≥ 20 % more kills+deaths", () => {
-    let calm = 0
-    let wild = 0
-    for (let seed = 0; seed < 4; seed++) {
-      const d = autoDraft(seed % 4, (seed + 1) % 4)
-      const run = (aggr: number) => {
-        const s = createMatch(map, d, {
-          seed,
-          tactics: {
-            blue: withBehavior(defaultTactics(d, "blue"), aggr),
-            red: withBehavior(defaultTactics(d, "red"), aggr),
-          },
-          maxTime: 12 * 60,
-        }).runToEnd()
-        return s.kills.blue + s.kills.red
-      }
-      calm += run(0)
-      wild += run(100)
-    }
-    expect(wild).toBeGreaterThanOrEqual(calm * 1.2)
-  }, 60_000)
 
   test("deterministic with tactics and live commands", () => {
     const d = autoDraft()
