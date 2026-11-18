@@ -196,6 +196,11 @@ describe("comms", () => {
     )
     expect(commsText(entry({}), [{ ...ana, igl: false }])).toContain("Ana (backup)")
   })
+  test("a pending coach call reads as relaying, never 0/5 following", () => {
+    expect(commsText(entry({ pending: true, followers: 0 }), [{ ...ana, igl: true }])).toBe(
+      'Coach → Ana (IGL): "Group up!" · relaying…',
+    )
+  })
   test("no caller alive", () => {
     expect(commsText(entry({ caller: null }), [])).toBe('Coach: "Group up!" · no caller alive')
     expect(noCallerAlive([{ ...ana, alive: false }, bo], "blue")).toBe(true)

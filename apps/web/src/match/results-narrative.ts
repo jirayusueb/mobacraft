@@ -34,46 +34,66 @@ export const mmss = (t: number) => {
 
 const k = (gold: number) => `${(Math.abs(gold) / 1000).toFixed(1)}k`
 
-/** Biggest single-sample change in the blue−red net-worth gap (gold toward the winner). */
+/** A deficit smaller than this is noise (one wave, one kill), not a game state. */
+export const COMEBACK_MIN = 3000
+/** Gold swings in the last 30 s are the Ancient falling, not a turning point. */
+const ENDGAME_WINDOW = 30
+
+/**
+ * "How it went" — only claims what the gold record supports:
+ *  - swing: the biggest gold-gap change toward the WINNER before the final 30 s
+ *    (the turning point), never the loser's noise or the endgame collapse;
+ *  - closing: "comeback" only when the winner trailed by ≥ COMEBACK_MIN and then
+ *    reached ≥ 0 again; "won while behind on gold" when they never recovered the
+ *    lead (objectives beat gold); otherwise "led from …" with the peak lead.
+ */
 export const narrative = (
   final: NarrativeInput,
   names: Readonly<Record<DraftSide, string>>,
 ): readonly NarrativeLine[] => {
   const lines: NarrativeLine[] = []
-  // Gold swing: largest step change of the blue−red gap across history samples.
+  const w = final.winner
+  const gapOf = (h: NarrativeInput["history"][number]) =>
+    w === "red" ? h.nw.red - h.nw.blue : h.nw.blue - h.nw.red
+  // Turning point: largest step toward the winner (or toward blue when no winner yet).
+  const cutoff = final.time - ENDGAME_WINDOW
   let swingT = -1
-  let swingSide: DraftSide | null = null
   let swingD = 0
   for (let i = 1; i < final.history.length; i++) {
-    const a = final.history[i - 1]!
     const b = final.history[i]!
-    const d = b.nw.blue - b.nw.red - (a.nw.blue - a.nw.red)
-    if (Math.abs(d) > Math.abs(swingD)) {
+    if (b.t > cutoff) break
+    const d = gapOf(b) - gapOf(final.history[i - 1]!)
+    if (d > swingD) {
       swingD = d
-      swingSide = d > 0 ? "blue" : "red"
       swingT = b.t
     }
   }
-  if (swingSide && swingT >= 0)
+  const swingSide: DraftSide = w ?? "blue"
+  if (swingT >= 0 && swingD >= 500)
     lines.push({
       kind: "swing",
-      text: `At ${mmss(swingT)} ${names[swingSide]} swung the gold lead by ${k(swingD)}`,
+      text: `Turning point ${mmss(swingT)}: ${names[swingSide]} swung the gold lead by ${k(swingD)}`,
     })
   // Last 3 objective events (towers, Roshan/Aegis, Ancient) as one line each.
   for (const e of final.feed.filter((f) => OBJECTIVE_KINDS.has(f.kind)).slice(-3))
     lines.push({ kind: "event", text: `${mmss(e.t)} · ${e.text}` })
-  // Closing line: winner + largest deficit they overcame (min of their gap).
-  if (final.winner) {
-    const gap = final.history.map((h) =>
-      final.winner === "blue" ? h.nw.blue - h.nw.red : h.nw.red - h.nw.blue,
-    )
-    const worst = gap.length ? Math.min(...gap) : 0
+  if (w) {
+    const gaps = final.history.map(gapOf)
+    const worst = gaps.length ? Math.min(...gaps) : 0
+    const best = gaps.length ? Math.max(...gaps) : 0
+    const worstAt = gaps.indexOf(worst)
+    const recovered = worstAt >= 0 && gaps.slice(worstAt).some((g) => g >= 0)
+    const end = gaps.at(-1) ?? 0
     lines.push({
       kind: "closing",
       text:
-        worst < 0
-          ? `${names[final.winner]} won — comeback from −${k(worst)}`
-          : `${names[final.winner]} won without ever trailing on gold`,
+        worst <= -COMEBACK_MIN && recovered
+          ? `${names[w]} won — comeback from −${k(worst)}`
+          : end < 0
+            ? `${names[w]} won while still −${k(end)} on gold — objectives beat gold`
+            : best > 0
+              ? `${names[w]} led by up to +${k(best)} and closed it out`
+              : `${names[w]} won an even game`,
     })
   }
   return lines

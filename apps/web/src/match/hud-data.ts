@@ -136,11 +136,15 @@ export const commsText = (c: CommsEntry, heroes: readonly HeroLine[]): string =>
   const isIgl = heroes.some((h) => h.side === c.side && h.igl && h.playerName === c.caller)
   const who = c.caller ? `${c.caller} (${isIgl ? "IGL" : "backup"})` : null
   const head = c.from === "coach" ? (who ? `Coach → ${who}` : "Coach") : (who ?? "IGL")
-  const tail = c.caller
-    ? ` · ${c.followers}/${c.total} following`
-    : /no caller/i.test(c.text)
-      ? ""
-      : " · no caller alive"
+  const tail = c.pending
+    ? c.caller
+      ? " · relaying…"
+      : ""
+    : c.caller
+      ? ` · ${c.followers}/${c.total} following`
+      : /no caller/i.test(c.text)
+        ? ""
+        : " · no caller alive"
   return `${head}: "${c.text}"${tail}`
 }
 

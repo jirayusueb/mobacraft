@@ -105,11 +105,16 @@ describe("coach call legibility (playtest fix #1)", () => {
     m.fx()
     expect(m.call("blue", "push")).toBe(true)
     expect(m.fx().filter((e) => e.kind === "aoe" && e.radius === 1.2)).toHaveLength(1)
-    // Every accepted call is acknowledged in comms.
-    const acks = m
-      .snapshot()
-      .comms.filter((e) => e.side === "blue" && e.from === "coach" && e.text.startsWith("Coach → "))
+    // Every accepted call is acknowledged in comms — exactly one entry per call, plain text
+    // (the UI adds "Coach → X (IGL):"), pending until the IGL relay resolves it in place.
+    const acks = m.snapshot().comms.filter((e) => e.side === "blue" && e.from === "coach")
     expect(acks.length).toBeGreaterThanOrEqual(4)
-    expect(acks[0]!.text).toMatch(/^Coach → .+ \(IGL\): /)
+    for (const a of acks) expect(a.text).not.toMatch(/^Coach → /)
+    expect(acks.at(-1)!.pending).toBe(true)
+    while (m.snapshot().comms.findLast((e) => e.side === "blue" && e.from === "coach")!.pending)
+      m.advance(0.25)
+    const after = m.snapshot().comms.filter((e) => e.side === "blue" && e.from === "coach")
+    expect(after).toHaveLength(acks.length)
+    expect(after.at(-1)!.followers).toBeGreaterThanOrEqual(1)
   }, 60_000)
 })

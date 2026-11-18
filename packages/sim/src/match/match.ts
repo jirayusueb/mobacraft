@@ -520,6 +520,8 @@ export interface CommsEntry {
   readonly text: string
   readonly followers: number
   readonly total: number
+  /** Coach call issued but not yet relayed by the IGL (followers unknown). */
+  readonly pending?: boolean
 }
 
 export interface RuneLine {
@@ -3668,7 +3670,18 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
             relayAt[side] = null
             iglCall[side] = null
             const n = rollFollow(side, calls[side].active!, "coach")
-            logComms(side, "coach", CALL_TEXT[calls[side].active!], n)
+            // Resolve the call's pending ack in place; fall back to a fresh line.
+            const i = comms.findLastIndex((e) => e.side === side && e.from === "coach" && e.pending)
+            const c = callerOf(side)
+            if (i >= 0)
+              comms[i] = {
+                ...comms[i]!,
+                caller: c ? c.body.hero!.player.name : null,
+                text: CALL_TEXT[calls[side].active!],
+                followers: n,
+                pending: false,
+              }
+            else logComms(side, "coach", CALL_TEXT[calls[side].active!], n)
           }
         }
       } else if (!calls[side].active) {
@@ -4420,29 +4433,21 @@ export const createMatch = (map: MobaMap, draft: DraftState, options: MatchOptio
                   }
                 : centre
     fx({ t: clock, kind: "aoe", at, radius: 1.2, team, style: "nova" })
-    // Acknowledge every accepted call in comms (the relay only logs when a caller is alive).
-    const iglName =
-      heroes.find((x) => x.hero!.player.id === tac[side].igl)?.hero?.player.name ?? "IGL"
+    // Acknowledge every accepted call with ONE comms entry, marked pending until the
+    // IGL relays it; the relay then updates this same entry in place (never a 2nd line).
+    for (const h of heroes) if (h.hero!.side === side) h.hero!.followCoach = false
+    const caller = callerOf(side)
     comms.push({
       t: clock,
       side,
       from: "coach",
-      caller: iglName,
-      text: `Coach → ${iglName} (IGL): ${CALL_TEXT[c]}`,
+      caller: caller ? caller.body.hero!.player.name : null,
+      text: caller ? CALL_TEXT[c] : `${CALL_TEXT[c]} — no caller alive, waiting`,
       followers: 0,
       total: 5,
+      pending: true,
     })
-    for (const h of heroes) if (h.hero!.side === side) h.hero!.followCoach = false
-    if (!callerOf(side))
-      comms.push({
-        t: clock,
-        side,
-        from: "coach",
-        caller: null,
-        text: `${CALL_TEXT[c]} — no caller alive, waiting`,
-        followers: 0,
-        total: 5,
-      })
+    if (comms.length > 200) comms.splice(0, comms.length - 200)
     return true
   }
 
