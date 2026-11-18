@@ -34,7 +34,13 @@ Discovery sketch. Vocabulary follows the codebase-design skill: **module**,
   per-call payloads), `bench:alloc` (sampling heap profiler, minutes 8→14),
   `bench:fingerprint` (4-seed runToEnd hash). 2026-11-17 pass: 5782 → 984 MB
   per 6 game-min (−83 %), sim 1.14 → 0.53 ms/frame at 8× speed; retained
-  ≈ 5 MB; largest remaining self-allocator 7 %.
+  ≈ 5 MB; largest remaining self-allocator 7 %. Rounds 2–4 (same day): 984 →
+  879 MB / 6 game-min (cumulative −85 %), advance() 636 → 452 KB/frame.
+  Residual `step`/`crowdTick`/`hypot` (≈ 19 %) is the V8 sampling profiler
+  attributing 80-byte samples to `Math.hypot` call sites — a profiler
+  artefact: V8's two-arg hypot builtin is allocation-free (math.tq fast path,
+  0.02 B/call measured). Replacing `Math.hypot` with `Math.sqrt(dx²+dz²)`
+  changes results (fingerprint differs) and is rejected.
 
 ## Modules and seams
 

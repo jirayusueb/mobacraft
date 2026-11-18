@@ -1,0 +1,68 @@
+{
+  "$comment": "Router tier. Rendered into a dsh `--patch` overlay (generated/router.patch.yml) for `dsh headless`. Tool rows below are real Loader entry ids from `dsh headless --dump-config` (dsh 0.2.2-rc.3).",
+  "role": "router",
+  "model": {
+    "provider": "claude",
+    "model": "claude-haiku-5-5"
+  },
+  "promptFile": "prompts/router.md",
+  "permissionMode": "read-only",
+  "approvalPolicy": "never",
+  "tools": {
+    "allow": ["spawn_worker", "reply_thread", "list_threads", "read", "grep", "glob"],
+    "deny": [
+      "bash",
+      "pwsh",
+      "execute",
+      "run_code",
+      "write",
+      "write_file",
+      "edit",
+      "edit_file",
+      "apply_patch",
+      "str_replace_editor",
+      "subagent",
+      "subagent_fork",
+      "workflow",
+      "send_message",
+      "job_kill",
+      "web_fetch",
+      "web_search",
+      "working_directory",
+      "create_goal",
+      "update_goal"
+    ]
+  },
+  "disableRows": [
+    "tool-bash",
+    "tool-pwsh",
+    "tool-jobs",
+    "tool-subagent",
+    "tool-subagent-fork",
+    "tool-subagent-control",
+    "tool-agent-team",
+    "tool-workflow",
+    "tool-goal",
+    "tool-web",
+    "tool-working-directory",
+    "agent-instructions"
+  ],
+  "toolFsConfig": {
+    "read": true,
+    "readImage": false,
+    "write": false,
+    "edit": false,
+    "applyPatch": false
+  },
+  "replyMaxWords": 100,
+  "dispatcher": {
+    "port": 8787,
+    "batchWindowMs": 500,
+    "maxBatchSize": 20,
+    "allowlistedSenders": ["jirayu", "github-actions[bot]"],
+    "mentionHandles": ["@super-agent", "@superagent"],
+    "ciEventTypes": ["ci.failure", "check_run.failed", "workflow_run.failed"],
+    "autoModeSenders": ["jirayu"],
+    "activeStatuses": ["queued", "running", "verifying", "idle"]
+  }
+}

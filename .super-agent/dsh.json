@@ -1,0 +1,32 @@
+{
+  "$comment": "Facts discovered from the installed dsh on this machine (Step 1). `bun .super-agent/cli.ts doctor` re-verifies every path and flag.",
+  "dshVersion": "0.2.2-rc.3",
+  "binary": "/Users/jirayu/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
+  "binaryEnv": "SUPER_AGENT_DSH_BIN",
+  "profile": "headless",
+  "dshHome": "~/.dsh",
+  "sessionsDir": "~/.dsh/sessions",
+  "extraPlugins": [
+    {
+      "id": "llm-subscriptions",
+      "name": "~/.dsh/profiles/desktop/node_modules/dsh-plugin-subscriptions/lib/index.js",
+      "why": "The headless profile disables the GUI credential store; this bundle reads its own OAuth token file, which supplies the `claude` provider routes used by router.json and worker.json."
+    }
+  ],
+  "flags": {
+    "patch": "--patch",
+    "json": "--json",
+    "sessionId": "--session-id",
+    "permissionMode": "--permission-mode",
+    "approvalPolicy": "--approval-policy",
+    "addDir": "--add-dir",
+    "stdinTask": "-"
+  },
+  "permissionPresets": ["read-only", "workspace-write", "danger-full-access"],
+  "loaderRows": {
+    "defaultModel": "agent-default-model",
+    "systemPrompt": "system-prompt",
+    "toolFs": "tool-fs",
+    "toolBash": "tool-bash"
+  }
+}
