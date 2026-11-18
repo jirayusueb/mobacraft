@@ -1,0 +1,4 @@
+super_agent.db*
+generated/
+logs/
+watchdog-fingerprints.json

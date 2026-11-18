@@ -1,0 +1,47 @@
+{
+  "$comment": "Worker tier. Rendered into generated/worker.patch.yml. Full dev tools stay mounted; plugins/worker-guard.mjs adds a monotonic ctx.tools.guard() deny layer and the dsh workspace-write sandbox confines writes to the thread worktree.",
+  "role": "worker",
+  "model": {
+    "provider": "claude",
+    "model": "claude-opus-5-5"
+  },
+  "promptFile": "prompts/worker.md",
+  "permissionMode": "workspace-write",
+  "approvalPolicy": "never",
+  "defaultMandateMode": "OBSERVE",
+  "worktreeRoot": "~/.super-agent/worktrees/mobacraft",
+  "branchPrefix": "super-agent/",
+  "baseRef": "HEAD",
+  "extraWritableDirs": ["~/.bun/install/cache"],
+  "toolFsConfig": {
+    "read": true,
+    "readImage": true,
+    "write": true,
+    "edit": true,
+    "applyPatch": true
+  },
+  "protectedPaths": [
+    "super_agent.db",
+    ".git/hooks",
+    ".github/workflows",
+    ".super-agent/plugins",
+    ".super-agent/prompts",
+    ".super-agent/generated"
+  ],
+  "verify": {
+    "setup": ["bun install --frozen-lockfile"],
+    "commands": [
+      "bunx oxfmt --check",
+      "bunx oxlint --deny-warnings",
+      "bun run typecheck",
+      "bun run test"
+    ],
+    "maxRepairRounds": 2,
+    "timeoutMs": 900000
+  },
+  "watchdog": {
+    "stallMinutes": 20,
+    "intervalSeconds": 60,
+    "maxSupervisoryChecks": 2
+  }
+}
