@@ -4,5 +4,5 @@
   "semi": false,
   "singleQuote": false,
   "trailingComma": "all",
-  "ignorePatterns": ["bun.lock", "dist", ".turbo"]
+  "ignorePatterns": ["bun.lock", "dist", ".turbo", ".agents", ".player-feedback"]
 }

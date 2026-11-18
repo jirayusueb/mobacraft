@@ -27,5 +27,5 @@
     ],
     "react-perf/jsx-no-new-array-as-prop": "off"
   },
-  "ignorePatterns": ["dist", "node_modules", ".turbo"]
+  "ignorePatterns": ["dist", "node_modules", ".turbo", ".agents", ".player-feedback"]
 }
